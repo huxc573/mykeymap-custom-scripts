@@ -1,0 +1,7 @@
+# 仓库内统一存 LF；工作区按文件类型还原。
+# AHK 源码在本机一直用 CRLF（编辑器与 MyKeymap 的默认），显式钉死，
+# 免得别人 clone 下来变成 LF 后 diff 全红。
+* text=auto eol=lf
+*.ahk text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf

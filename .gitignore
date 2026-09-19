@@ -1,0 +1,7 @@
+# 录制脚本默认产物目录（KeyRecorder 的默认保存位置）
+scripts/
+
+# 杂项
+*.log
+Thumbs.db
+desktop.ini
