@@ -1,6 +1,6 @@
 # MyKeymap 自定义脚本
 
-> **v1.0**（`VERSION` = `1.0.0` · 2026-09-19 22:03）· 变更见 [CHANGELOG.md](CHANGELOG.md)
+> **v1.1**（`VERSION` = `1.1.0` · 2026-10-07 09:22）· 变更见 [CHANGELOG.md](CHANGELOG.md)
 
 给 [MyKeymap](https://mykeymap.com) 写的三个 AutoHotkey v2 模块。全部**本地运行、不联网、不驻留后台服务**。
 
@@ -10,7 +10,7 @@
 | :--- | :--- | :--- |
 | `KeyRecorder.ahk` | 键鼠录制 / 回放。可把录到的操作存成 JSON 脚本文件，之后再加载回放 | `RecToggle` / `RecPlay` / `RecSave` / `RecLoad` / `RecStop` / `RecClear` / `RecInfo` |
 | `AutoClick.ahk` | 连点器。有「前台」和「后台」两条后端：后台用窗口消息投递，不移动系统光标、不抢焦点 | `AutoClick` / `AutoClickStop` / `AutoClickProbe` |
-| `Brightness.ahk` | 屏幕亮度调节。Gamma / DDC-CI / WMI / 遮罩四种办法按可用性降级 | `BrightAuto` / `BrightGamma` / `BrightGammaReset` / `BrightRefreshGamma` / `BrightMask` / `BrightDdc` / `BrightWmi` |
+| `Brightness.ahk` | 屏幕亮度调节。**只动鼠标所在的那块屏**（可用 `BR_PerMonitor` 关掉改成全屏）。两个入口：`BrightAuto` 软件优先（Gamma → 遮罩）、`BrightHw` 硬件优先（背光 → Gamma → 遮罩） | `BrightAuto` / `BrightHw` / `BrightDdc` / `BrightWmi` / `BrightGamma` / `BrightGammaReset` / `BrightRefreshGamma` / `BrightMask` / `BrightCursorRestore` |
 
 每个文件头部都有详细注释：函数签名、参数含义、返回值，以及实现时踩过的坑。
 
@@ -24,6 +24,10 @@
    #Include ../data/self/Brightness.ahk
    #Include ../data/self/KeyRecorder.ahk
    ```
+
+   > **依赖**：`KeyRecorder` 复用了 `AutoClick` 里的两个小工具（`AcTip` 贴光标提示、`AcMouseScreen` 取鼠标所在屏幕），
+   > 所以 `AutoClick.ahk` 要排在前面，这两个文件别拆开单独装（只装 KeyRecorder 时提示会报「函数未定义」）。
+   > `Brightness.ahk` 无跨模块依赖，可以单独用。
 
 3. 在 MyKeymap 的设置界面里，给热键选「自定义函数 / ahkCode」并填下表里的调用，保存后重载脚本。
 
@@ -57,13 +61,20 @@
 | `*` `MButton` | `BrightAuto(0)` |
 | `*` `WheelDown` | `BrightAuto(-5)` |
 | `*` `WheelUp` | `BrightAuto(5)` |
+| `*` `-` | `BrightHw(-2)` |
+| `*` `=` | `BrightHw(2)` |
+
+滚轮走软件层（快，不碰显示器硬件），`-` / `=` 走硬件背光。`delta = 0` 是还原，两个入口一样：硬件还回原值、Gamma 清空、遮罩撤掉。
 
 ## 说明与边界
 
 - **不联网、不写注册表、不装服务**。三个模块都只在 MyKeymap 进程里跑。
 - `KeyRecorder` 录的是**物理按键与鼠标事件**并原样回放，属于本地宏工具。录制文件默认存在脚本所在目录的 `scripts\` 子目录，是纯文本 JSON，可以直接读、手改、版本管理。
 - `AutoClick` 的「后台」后端靠给目标窗口投递鼠标消息实现。它对**按系统真实光标定位**的程序（典型是 Unity 引擎做的游戏）无效；也不适用于 UWP / 部分 RawInput 程序。**请只用于你自己的、允许自动化的软件**；在游戏里用可能违反其用户协议。
-- `Brightness` 的 Gamma 办法在 WinPE 下无效，会自动退回遮罩方案。
+- `Brightness` 的 Gamma 办法在 WinPE 下无效（`SetDeviceGammaRamp` 是空操作），会自动退回遮罩方案；遮罩只能变暗，且压不住开始菜单与独占全屏程序。
+- **硬件背光档有前提**：外接屏要在显示器 OSD 里打开 DDC/CI；笔记本内屏要固件暴露 WMI 亮度接口（多数机型可以）。
+  两者都不满足时会自动退到 Gamma —— 此时 `BrightHw` 与 `BrightAuto` 表现一致，不是没生效，是这台机器没有可用的硬件通道。
+- 按屏生效靠显示器设备名（`\\.\DISPLAYn`）：插拔显示器或换接口后编号可能变，按当前编号重新调一次即可。
 
 ## 版本管理
 
