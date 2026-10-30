@@ -6,8 +6,10 @@
 ;   bg   （后台）  用 PostMessage 往目标窗口投鼠标消息。光标一动不动、焦点不变，
 ;                  但只对「自己处理鼠标消息」的程序有效 —— 限制见后半段开头。
 ;
-; 对外 3 个入口 + 1 个旧名兼容：
-;   AutoClick(followCursor, button, interval, cancelOnMove, target, backend)
+; 对外 5 个入口 + 1 个旧名兼容：
+;   AutoClickToggle()                 按「设置界面」存下来的参数 开 / 停（主入口）
+;   AutoClickSettings()               弹设置界面；改完写盘，下次 AutoClickToggle 就按新的来
+;   AutoClick(followCursor, button, interval, cancelOnMove, target, backend, tipMode)
 ;       开/关连点，再调一次 = 停（哪个后端在跑就停哪个）。
 ;   AutoClickStop(reason)             显式停止，两个后端都停
 ;   AutoClickProbe(button, target)    bg 的单发试针：按一次只发一组消息，并把
@@ -28,16 +30,20 @@
 ;   target        仅 backend="bg"：0/空 = 光标下的窗口；数字 = 窗口句柄；
 ;                   字符串 = 窗口标题 / ahk_exe xxx 之类
 ;   backend       "front"（默认）/ "bg"
+;   tipMode       浮窗档位 "persist"（常驻，默认）/ "fade"（2 秒自消）/ "off"（不显示）
+;                   不写 = 用设置文件里的档位
 ;
 ;   【参数只有"写了"才生效】默认值写在函数签名里，调用处不写就等于用默认。
 ;   所以要"鼠标一动就停"必须把第 4 个参数写成 true：
 ;       AutoClick(false, "L", 50, true)
 ;
-; 当前接线（data/config.json 的 CapsLock 键位里）：
-;   *p     -> AutoClickBg(false, "L", 50, false)   后台左键 50ms（旧名写法，仍有效）
-;   *LAlt  -> AutoClick(false, "R", 50, false)     前台右键
-;   *LWin  -> AutoClick(false, "L", 50, true)      前台左键 + 移动就停
-;   *LCtrl -> AutoClick(false, "L", 50, false)     前台左键
+; 当前接线（data/config.json）：
+;   【Tab 模式】*LCtrl -> AutoClickToggle()     按设置开 / 停（主入口）
+;              *LWin  -> AutoClickSettings()   设置界面
+;   【CapsLock】*p     -> AutoClickBg(false, "L", 50, false)   后台左键 50ms（旧名写法，仍有效）
+;              *LAlt  -> AutoClick(false, "R", 50, false)     前台右键（临时预设）
+;              *LWin  -> AutoClick(false, "L", 50, true)      前台左键 + 移动就停（临时预设）
+;              *LCtrl -> AutoClick(false, "L", 50, false)     前台左键（临时预设）
 ;   再按一次同一个键 = 停止。
 ;
 ; 更多用法：
@@ -47,10 +53,19 @@
 ;   AutoClick(false, "L", 50, false, 123456)     后台左键，点句柄 0x1E240
 ;   AutoClickProbe("L")                          后台试针（先验目标吃不吃消息）
 ;
-; 提示：贴在点击位置旁边（不是屏幕角），2 秒后自动消失。
+; 提示：贴在点击位置旁边（不是屏幕角），显示时长由「浮窗」档位决定：
+;   persist 常驻（默认）  启动提示一直挂到按停止；停止后换成 连点器[停止]，2 秒自清
+;   fade    短暂          2 秒自消（旧行为）
+;   off     关闭          不弹启动/停止提示 —— 但"没找到窗口"这类**错误提示照弹**
 ;   前台  连点器[前台]（启动） / 连点器[停止]          —— ToolTip 通道 1
 ;   后台  连点器[后台]（启动） / 连点器[停止]          —— ToolTip 通道 AC_BgTipNo(6)
 ;   两条流水线各用各的通道，同时跑也不会互相清掉提示。
+;
+; 设置文件：<本模块目录>\scripts\autoclick.cfg（UTF-8 无 BOM，一行一条 key=value）
+;   backend=front|bg   button=L|M|R   interval=1..60000
+;   follow=0|1         cancelMove=0|1  tipMode=persist|fade|off
+;   文件不存在 / 某项认不出 = 用内置默认；手改也行，AutoClickToggle 每次都重读（不用重载脚本）。
+;   ⚠ 不用 IniWrite：它新建文件的编码不受控，会破坏本仓"UTF-8 无 BOM"的规矩。
 ;
 ; 说明：
 ;   1. 用 SetTimer 驱动，不阻塞脚本主线程，不影响 MyKeymap 其他热键
@@ -96,6 +111,13 @@ AC_TipMs         := 2000   ; 提示停留时长(ms)
 AC_TipGap        := 16     ; 提示相对连点位置的偏移(px)，避开点击点本身
 AC_TipEstW       := 190    ; 提示预估宽(px)，只用于贴边时翻方向（前台/后台共用，取宽的那个）
 AC_TipEstH       := 46     ; 提示预估高(px)，两行提示，同上
+
+; ========== 设置文件（AutoClickToggle / AutoClickSettings 用） ==========
+AC_CfgName       := "autoclick.cfg"  ; 落在 <模块目录>\scripts\ 下（发布仓 .gitignore 已忽略）
+AC_CfgPath       := ""     ; 完整路径，懒算一次，见 AcCfgPath()
+AC_Home          := ""     ; 本模块目录，懒算一次，见 AcHomeDir()
+AC_TipMode       := ""     ; 当前浮窗档位 persist / fade / off，见 AcTipModeGet()
+AC_TipModeLoaded := false  ; 是否已从设置文件读过档位
 
 ; ========== 前台：内部状态 ==========
 AC_Running := false        ; 是否正在连点
@@ -159,9 +181,10 @@ AcStopText(reason := "") {
 ;   - 偏移 AC_TipGap，保证提示窗口不压在点击点上（否则可能挡住自己的点击）
 ;   - 贴到屏幕右 / 下边界外时翻到反方向，再兜底夹进屏幕内
 ;   - 存 / 还原 CoordMode，不污染 MyKeymap 的全局设置
-;   - AC_TipMs 后自动消失；同一通道的新提示会顶掉上一次的自动清除
+;   - AC_TipMs 后自动消失；persist=true 则不挂这个定时器（浮窗常驻档用）
+;   - 同一通道的新提示会顶掉上一次的自动清除（所以"常驻 -> 停止"能自然收尾）
 ;--------------------------------------------------------------------
-AcTip(text, ax, ay, tipNo := 1) {
+AcTip(text, ax, ay, tipNo := 1, persist := false) {
     global AC_TipMs, AC_TipGap, AC_TipEstW, AC_TipEstH, AC_TipTimers
     oldMode := A_CoordModeToolTip
     CoordMode("ToolTip", "Screen")
@@ -182,8 +205,13 @@ AcTip(text, ax, ay, tipNo := 1) {
 
     if !IsObject(AC_TipTimers)
         AC_TipTimers := Map()
-    if AC_TipTimers.Has(tipNo)                ; 先清掉同一通道上一轮的自动清除
+    if AC_TipTimers.Has(tipNo) {              ; 先清掉同一通道上一轮的自动清除
         SetTimer(AC_TipTimers[tipNo], 0)
+        AC_TipTimers.Delete(tipNo)
+    }
+    if (persist)                              ; 常驻：不挂清除定时器，等下一次提示来顶掉
+        return
+
     cb := AcTipClear.Bind(tipNo)              ; 绑定对象要存下来才取消得掉，见【坑 3】
     AC_TipTimers[tipNo] := cb
     SetTimer(cb, -AC_TipMs)
@@ -204,6 +232,428 @@ AcMouseScreen(&mx, &my) {
     CoordMode("Mouse", oldMode)
 }
 
+;====================================================================
+; 设置文件 + 设置界面
+;   AutoClickToggle()   读盘 -> 开 / 停
+;   AutoClickSettings() 读盘 -> 改 -> 写盘
+;   参数落在 <模块目录>\scripts\autoclick.cfg，一行一条 key=value。
+;
+; 【为什么必须落盘，不能只存内存】
+;   data/custom_functions.ahk 在 WM_DISPLAYCHANGE 里挂了
+;   SetTimer(MyKeymapReload, -5000) —— 插拔显示器 / 改分辨率后 MyKeymap 会
+;   5 秒后自己重载脚本，内存里的设置会被静默清回默认值。
+;====================================================================
+
+;--------------------------------------------------------------------
+; 本模块所在目录
+;   坑：include 文件里**顶层**的 A_LineFile 是宿主 bin/MyKeymap.ahk，
+;   只有**函数体内**拿到的才是本文件自己的路径 —— 所以只能懒算，别写顶层。
+;--------------------------------------------------------------------
+AcHomeDir() {
+    global AC_Home
+    if (AC_Home != "")
+        return AC_Home
+    SplitPath(A_LineFile, , &dir)
+    AC_Home := (dir != "") ? dir : A_ScriptDir
+    return AC_Home
+}
+
+AcCfgPath() {
+    global AC_CfgPath, AC_CfgName
+    if (AC_CfgPath != "")
+        return AC_CfgPath
+    AC_CfgPath := AcHomeDir() "\scripts\" AC_CfgName
+    return AC_CfgPath
+}
+
+;--------------------------------------------------------------------
+; 内置默认值（配置文件不存在 / 某项认不出时用它）
+;--------------------------------------------------------------------
+AcCfgDefault() {
+    return {backend: "front", button: "L", interval: 50, follow: false, cancelMove: false, tipMode: "persist"}
+}
+
+;--------------------------------------------------------------------
+; 数值兜底：空 / 非数字 -> def；否则四舍五入并钳到 [lo, hi]
+;--------------------------------------------------------------------
+AcNum(v, lo, hi, def) {
+    s := Trim(String(v))
+    if (s = "" || !IsNumber(s))
+        return def
+    return AcClamp(Round(s + 0), lo, hi)
+}
+
+;--------------------------------------------------------------------
+; 浮窗档位字符串归一（认几种手写别名，认不出 = 常驻）
+;--------------------------------------------------------------------
+AcModeValue(v) {
+    switch StrLower(Trim(String(v))) {
+        case "fade", "2", "2s", "short": return "fade"
+        case "off", "0", "none", "hide", "no": return "off"
+        default: return "persist"
+    }
+}
+
+;--------------------------------------------------------------------
+; 按钮字符串归一："m"/"middle" -> "M"，认不出 = "L"
+;   （AcButton 是拿首字母去换算 AHK 按钮名，这个是给配置文件用的）
+;--------------------------------------------------------------------
+AcButtonKey(v) {
+    b := StrUpper(SubStr(Trim(String(v)), 1, 1))
+    return (b = "M" || b = "R") ? b : "L"
+}
+
+;--------------------------------------------------------------------
+; 读设置文件（每次 AutoClickToggle 都重读，改完不用重载脚本）
+;   坏行 / 未知键直接跳过，不抛异常 —— 一个手滑不该让连点器整个用不了
+;--------------------------------------------------------------------
+AcCfgLoad() {
+    global AC_IntervalMin, AC_IntervalMax
+    cfg := AcCfgDefault()
+    path := AcCfgPath()
+    if !FileExist(path)
+        return cfg
+    try txt := FileRead(path, "UTF-8")
+    catch
+        return cfg
+
+    for line in StrSplit(txt, "`n", "`r") {
+        line := Trim(line)
+        if (line = "" || SubStr(line, 1, 1) = ";")
+            continue
+        p := InStr(line, "=")
+        if (!p)
+            continue
+        k := Trim(SubStr(line, 1, p - 1))
+        v := Trim(SubStr(line, p + 1))
+        switch k {
+            case "backend":
+                cfg.backend := (StrLower(v) = "bg") ? "bg" : "front"
+            case "button":
+                cfg.button := AcButtonKey(v)
+            case "interval":
+                cfg.interval := AcNum(v, AC_IntervalMin, AC_IntervalMax, 50)
+            case "follow":
+                cfg.follow := (v = "1" || StrLower(v) = "true")
+            case "cancelMove":
+                cfg.cancelMove := (v = "1" || StrLower(v) = "true")
+            case "tipMode":
+                cfg.tipMode := AcModeValue(v)
+        }
+    }
+    if (cfg.follow)                    ; 跟随模式下"移动就停"无从判断，代码里也会忽略
+        cfg.cancelMove := false
+    return cfg
+}
+
+;--------------------------------------------------------------------
+; 写设置文件
+;   用 FileOpen + "UTF-8-RAW"（不加 BOM），跟本仓其他文件一个规矩；
+;   ⛔别换成 IniWrite —— 它新建文件时的编码不受控。
+;--------------------------------------------------------------------
+AcCfgSave(cfg) {
+    path := AcCfgPath()
+    SplitPath(path, , &dir)
+    if (dir != "" && !DirExist(dir)) {
+        try DirCreate(dir)
+        catch
+            return false
+    }
+    txt := "; 连点器设置 —— AutoClickSettings() 写入；也可以手改，AutoClickToggle 每次都重读`r`n"
+    txt .= "backend=" cfg.backend "`r`n"
+    txt .= "button=" cfg.button "`r`n"
+    txt .= "interval=" cfg.interval "`r`n"
+    txt .= "follow=" (cfg.follow ? 1 : 0) "`r`n"
+    txt .= "cancelMove=" (cfg.cancelMove ? 1 : 0) "`r`n"
+    txt .= "tipMode=" cfg.tipMode "`r`n"
+    try {
+        f := FileOpen(path, "w", "UTF-8-RAW")
+        f.Write(txt)
+        f.Close()
+        return true
+    } catch {
+        return false
+    }
+}
+
+;--------------------------------------------------------------------
+; 当前浮窗档位（懒读设置文件，只读一次）
+;--------------------------------------------------------------------
+AcTipModeGet() {
+    global AC_TipMode, AC_TipModeLoaded
+    if (!AC_TipModeLoaded) {
+        AC_TipMode := AcCfgLoad().tipMode
+        AC_TipModeLoaded := true
+    }
+    return AC_TipMode
+}
+
+AcTipModeSet(mode) {
+    global AC_TipMode, AC_TipModeLoaded
+    AC_TipMode := AcModeValue(mode)
+    AC_TipModeLoaded := true
+}
+
+;--------------------------------------------------------------------
+; 启动 / 停止提示：受浮窗档位管
+;   isStart=true 且档位=persist 才常驻；停止提示一律 2 秒自清（否则常驻会留残影）
+;   错误提示（没找到窗口 / 取客户区失败）不走这里，永远弹
+;--------------------------------------------------------------------
+AcTipState(text, ax, ay, tipNo, isStart) {
+    mode := AcTipModeGet()
+    if (mode = "off") {
+        ; 停止时照样清一次：档位是"常驻"时留下的提示没有清除定时器，
+        ; 改档位后按停止就再也没人收它了 —— 会永远挂在屏幕上
+        if (!isStart)
+            AcTipClear(tipNo)
+        return
+    }
+    AcTip(text, ax, ay, tipNo, (isStart && mode = "persist"))
+}
+
+;--------------------------------------------------------------------
+; 文案标签
+;--------------------------------------------------------------------
+AcBackendLabel(be) {
+    return (StrLower(Trim(String(be))) = "bg") ? "后台" : "前台"
+}
+
+AcTipModeLabel(m) {
+    switch AcModeValue(m) {
+        case "fade": return "2 秒"
+        case "off":  return "关闭"
+        default:     return "常驻"
+    }
+}
+
+AcCfgSummary(cfg) {
+    s := AcBackendLabel(cfg.backend) " · " AcButtonLabel(cfg.button) " · " cfg.interval "ms · "
+    s .= cfg.follow ? "跟随光标" : "固定点"
+    if (cfg.cancelMove)
+        s .= " · 移动停"
+    s .= " · 浮窗" AcTipModeLabel(cfg.tipMode)
+    return s
+}
+
+;--------------------------------------------------------------------
+; 对外：按设置文件里的参数 开 / 停（Tab+Ctrl 走这个）
+;   正在连点 -> 停；没在跑 -> 读盘后按配置启动
+;   配置里的 backend=bg 时，目标是**启动那一刻**光标下的窗口
+;--------------------------------------------------------------------
+AutoClickToggle() {
+    global AC_Running, AC_BgRunning
+    if (AC_Running || AC_BgRunning) {
+        AutoClickStop()
+        return true
+    }
+    cfg := AcCfgLoad()
+    AcTipModeSet(cfg.tipMode)
+    AutoClick(cfg.follow, cfg.button, cfg.interval, cfg.cancelMove, 0, cfg.backend)
+    return true
+}
+
+;--------------------------------------------------------------------
+; 对外：设置界面（Tab+Win 走这个）
+;   开着连点时先停 —— 前台后端会把光标拽走，那会儿根本点不动这个窗口
+;   返回值：true = 保存了 / false = 取消或写盘失败
+;--------------------------------------------------------------------
+AutoClickSettings() {
+    global AC_Running, AC_BgRunning
+    if (AC_Running || AC_BgRunning)
+        AutoClickStop()
+
+    st := {cfg: AcCfgLoad(), ok: false, g: 0}
+    AcCfgGui(st)
+    if (!st.g)
+        return false
+
+    AcShowModal(st.g, "w392 h400 Center", st.edInterval)
+    if (!st.ok)
+        return false
+
+    AcMouseScreen(&mx, &my)
+    if (!AcCfgSave(st.cfg)) {
+        AcTip("设置:写入失败`n" AcCfgPath(), mx, my, 1, false)
+        return false
+    }
+    AcTipModeSet(st.cfg.tipMode)
+    AcTip("设置已保存`n" AcCfgSummary(st.cfg), mx, my, 1, false)
+    return true
+}
+
+;--------------------------------------------------------------------
+; 弹窗挂起 + 等待关闭
+;   Suspend 必须在**建框之后**调 —— 建框抛异常时不会把脚本留在挂起态；
+;   原值要还回去（MyKeymap 自己有裸 Suspend 的用法）。
+;   不 Suspend 的后果：Tab 层 / CapsLock 层的热键还在，输入框里
+;   "有的数字打得进、有的打不进"（见 KeyRecorder 坑 R10 / R20）。
+;--------------------------------------------------------------------
+AcShowModal(g, opts, focusCtl := 0) {
+    wasSuspended := A_IsSuspended
+    Suspend(true)
+    try {
+        g.Show(opts)
+        WinActivate("ahk_id " g.Hwnd)
+        if (IsObject(focusCtl))
+            try focusCtl.Focus()
+        WinWaitClose("ahk_id " g.Hwnd)
+    } finally {
+        Suspend(wasSuspended)
+    }
+}
+
+;--------------------------------------------------------------------
+; 建设置界面（**不 Show**）
+;   拆成"建框 / 取值 / 恢复默认"三块，控件选项写错是**建的时候就抛**，
+;   拆开才能在不弹窗的前提下把它跑一遍验证掉。
+;   坑：Gui 的**窗口构造选项不认 w/h**，尺寸只能写在 Show() 里（控件选项支持）。
+;--------------------------------------------------------------------
+AcCfgGui(st) {
+    global AC_IntervalMin, AC_IntervalMax
+    cfg := st.cfg
+
+    ckL      := (cfg.button = "L") ? " Checked" : ""
+    ckM      := (cfg.button = "M") ? " Checked" : ""
+    ckR      := (cfg.button = "R") ? " Checked" : ""
+    ckFixed  := cfg.follow ? "" : " Checked"
+    ckFollow := cfg.follow ? " Checked" : ""
+    ckCancel := cfg.cancelMove ? " Checked" : ""
+    ckFront  := (StrLower(cfg.backend) = "bg") ? "" : " Checked"
+    ckBg     := (StrLower(cfg.backend) = "bg") ? " Checked" : ""
+    tipIdx   := (cfg.tipMode = "fade") ? 2 : ((cfg.tipMode = "off") ? 3 : 1)
+
+    g := Gui("+AlwaysOnTop -MinimizeBox -MaximizeBox", "连点器设置")
+    g.SetFont("s9", "Microsoft YaHei UI")
+
+    g.AddGroupBox("x12 y12 w368 h136", "点击")
+    g.AddText("x24 y34 w44", "按键")
+    rL := g.AddRadio("x76 y32 w56" ckL, "左键")
+    rM := g.AddRadio("x136 y32 w56" ckM, "中键")
+    rR := g.AddRadio("x196 y32 w56" ckR, "右键")
+
+    g.AddText("x24 y62 w44", "间隔")
+    edInt := g.AddEdit("x76 y59 w70 Number", String(cfg.interval))
+    udInt := g.AddUpDown("x149 y59 w18", AC_IntervalMin "-" AC_IntervalMax)   ; 必须紧跟上面的 Edit
+    edInt.Value := String(cfg.interval)        ; 坑：UpDown 挂上来会把 Edit 改成范围下限，得再写一次
+    g.AddText("x172 y62 w160 cGray", "ms（" AC_IntervalMin "–" AC_IntervalMax "）")
+
+    g.AddText("x24 y90 w44", "位置")
+    rFixed := g.AddRadio("x76 y88 w72" ckFixed, "固定点")
+    rFollow := g.AddRadio("x160 y88 w84" ckFollow, "跟随光标")
+    cbCancel := g.AddCheckBox("x76 y112 w290" ckCancel, "鼠标一动就停（仅固定点有效）")
+
+    g.AddGroupBox("x12 y152 w368 h94", "后端")
+    rFront := g.AddRadio("x24 y174 w330" ckFront, "前台：真挪光标，什么程序都能点")
+    rBg := g.AddRadio("x24 y196 w330" ckBg, "后台：投窗口消息，不挪光标")
+    g.AddText("x24 y220 w340 cGray", "后台目标＝启动时光标下的窗口；Unity / UWP 可能收不到")
+
+    g.AddGroupBox("x12 y254 w368 h64", "浮窗")
+    g.AddText("x24 y278 w44", "显示")
+    cbTip := g.AddComboBox("x76 y275 w132 ReadOnly", ["常驻（不消失）", "2 秒后消失", "不显示"])
+    cbTip.Value := tipIdx
+    g.AddText("x214 y278 w160 cGray", "常驻 = 一直挂到按停止")
+
+    txtSum := g.AddText("x16 y328 w368 cGray", "当前：" AcCfgSummary(cfg))
+    btnOK := g.AddButton("x16 y354 w116 h30 Default", "保存")
+    btnReset := g.AddButton("x146 y354 w116 h30", "恢复默认")
+    btnNo := g.AddButton("x276 y354 w100 h30", "取消")
+
+    btnOK.OnEvent("Click", (*) => AcCfgTake(st))
+    btnReset.OnEvent("Click", (*) => AcCfgResetUI(st))
+    btnNo.OnEvent("Click", (*) => g.Destroy())
+    g.OnEvent("Close", (*) => g.Destroy())
+    g.OnEvent("Escape", (*) => g.Destroy())
+
+    syncH := (*) => AcCfgSync(st)              ; 一个闭包给所有控件用，别在 for 里建（会全部指向最后一个）
+    for ctl in [rL, rM, rR, rFixed, rFollow, cbCancel, rFront, rBg]
+        ctl.OnEvent("Click", syncH)
+    cbTip.OnEvent("Change", syncH)
+    edInt.OnEvent("Change", syncH)
+
+    st.g := g
+    st.edInterval := edInt
+    st.udInterval := udInt
+    st.rL := rL
+    st.rM := rM
+    st.rR := rR
+    st.rFixed := rFixed
+    st.rFollow := rFollow
+    st.cbCancel := cbCancel
+    st.rFront := rFront
+    st.rBg := rBg
+    st.cbTip := cbTip
+    st.txtSum := txtSum
+    AcCfgSync(st)                              ; 初始就把"跟随 -> 移动停置灰"摆对
+}
+
+;--------------------------------------------------------------------
+; 界面 -> 配置对象（不写盘）
+;--------------------------------------------------------------------
+AcCfgReadUI(st) {
+    global AC_IntervalMin, AC_IntervalMax
+    btn := "L"
+    if (st.rM.Value)
+        btn := "M"
+    else if (st.rR.Value)
+        btn := "R"
+
+    follow := st.rFollow.Value ? true : false
+    cancel := (!follow && st.cbCancel.Value) ? true : false
+
+    modes := ["persist", "fade", "off"]
+    mi := st.cbTip.Value
+    if (mi < 1 || mi > 3)
+        mi := 1
+
+    return {
+        backend: st.rBg.Value ? "bg" : "front",
+        button: btn,
+        interval: AcNum(st.edInterval.Value, AC_IntervalMin, AC_IntervalMax, 50),
+        follow: follow,
+        cancelMove: cancel,
+        tipMode: modes[mi]
+    }
+}
+
+;--------------------------------------------------------------------
+; 界面联动：跟随光标 -> "移动就停"置灰并清掉勾；顺便刷新底部摘要
+;--------------------------------------------------------------------
+AcCfgSync(st) {
+    follow := st.rFollow.Value ? true : false
+    st.cbCancel.Enabled := !follow
+    if (follow && st.cbCancel.Value)
+        st.cbCancel.Value := false
+    st.txtSum.Text := "当前：" AcCfgSummary(AcCfgReadUI(st))
+}
+
+;--------------------------------------------------------------------
+; 保存按钮的处理体（独立出来，能在不弹窗的情况下直接验证）
+;--------------------------------------------------------------------
+AcCfgTake(st) {
+    st.cfg := AcCfgReadUI(st)
+    st.ok := true
+    st.g.Destroy()
+}
+
+;--------------------------------------------------------------------
+; 恢复默认：只改界面，不写盘 —— 还得自己按保存
+;   顺序有讲究：先把要取消的那几个设 false，最后再设 true，否则会把刚选上的顶掉
+;--------------------------------------------------------------------
+AcCfgResetUI(st) {
+    d := AcCfgDefault()
+    st.rM.Value := (d.button = "M")
+    st.rR.Value := (d.button = "R")
+    st.rL.Value := (d.button = "L")
+    st.rFixed.Value := !d.follow
+    st.rFollow.Value := d.follow
+    st.cbCancel.Value := d.cancelMove
+    st.rBg.Value := (d.backend = "bg")
+    st.rFront.Value := (d.backend = "front")
+    st.cbTip.Value := 1
+    st.edInterval.Value := String(d.interval)
+    AcCfgSync(st)
+}
+
 ;--------------------------------------------------------------------
 ; 统一入口：开 / 关连点
 ;   followCursor  是否跟随光标连点（默认 false = 固定在启动时的点）
@@ -214,16 +664,22 @@ AcMouseScreen(&mx, &my) {
 ;   backend       "front"（默认）真挪光标，什么程序都能点，代价是占着鼠标
 ;                 "bg"           往目标窗口投消息，不占光标、不抢焦点，
 ;                                只对「自己处理鼠标消息」的程序有效（见后半段）
+;   tipMode       浮窗档位 "persist" / "fade" / "off"，不写 = 用设置文件里的档位
 ;
 ;   再调一次同一个入口 = 停（哪个后端在跑就停哪个）
 ;--------------------------------------------------------------------
-AutoClick(followCursor := false, button := "L", interval := 50, cancelOnMove := false, target := 0, backend := "front") {
+AutoClick(followCursor := false, button := "L", interval := 50, cancelOnMove := false, target := 0, backend := "front", tipMode := "") {
     global AC_Running, AC_BgRunning
 
     if (AC_Running || AC_BgRunning) {         ; 任一后端在跑 -> 本次当"关闭"
         AutoClickStop()
         return
     }
+
+    if (tipMode != "")                        ; 显式传了就用传的
+        AcTipModeSet(tipMode)
+    else
+        AcTipModeGet()                        ; 没传就沿用设置文件里的浮窗档位
 
     if (StrLower(Trim(String(backend))) = "bg")
         return AcBgStart(followCursor, button, interval, cancelOnMove, target)
@@ -244,12 +700,16 @@ AutoClickStop(reason := "停止") {
 ; 旧名兼容：config.json 的 *p 现在绑的还是 AutoClickBg(false, "L", 50, false)。
 ; 新写法：AutoClick(false, "L", 50, false, 0, "bg")。
 ;--------------------------------------------------------------------
-AutoClickBg(followCursor := false, button := "L", interval := 50, cancelOnMove := false, target := 0, fakeActivate := "") {
+AutoClickBg(followCursor := false, button := "L", interval := 50, cancelOnMove := false, target := 0, fakeActivate := "", tipMode := "") {
     global AC_Running, AC_BgRunning
     if (AC_Running || AC_BgRunning) {
         AutoClickStop()
         return
     }
+    if (tipMode != "")
+        AcTipModeSet(tipMode)
+    else
+        AcTipModeGet()
     return AcBgStart(followCursor, button, interval, cancelOnMove, target, fakeActivate)
 }
 
@@ -288,7 +748,7 @@ AcFrontStart(followCursor := false, button := "L", interval := 50, cancelOnMove 
     AC_Running := true
     SetTimer(AcFrontTick, -1)         ; 负值 = 只触发一次，之后由 AcFrontTick 自己续期
 
-    AcTip(AcStartText(), AC_X, AC_Y)
+    AcTipState(AcStartText(), AC_X, AC_Y, 1, true)
 }
 
 ;--------------------------------------------------------------------
@@ -301,7 +761,7 @@ AcFrontStop(reason := "停止") {
         return
     AC_Running := false
     SetTimer(AcFrontTick, 0)
-    AcTip(AcStopText(reason), AC_X, AC_Y)
+    AcTipState(AcStopText(reason), AC_X, AC_Y, 1, false)
 }
 
 ;--------------------------------------------------------------------
@@ -471,6 +931,12 @@ AcBgStartText() {
 AcBgTip(text, ax, ay) {
     global AC_BgTipNo
     AcTip(text, ax, ay, AC_BgTipNo)
+}
+
+; 启动 / 停止提示（受浮窗档位管）；错误提示仍走 AcBgTip，永远弹
+AcBgTipState(text, ax, ay, isStart) {
+    global AC_BgTipNo
+    AcTipState(text, ax, ay, AC_BgTipNo, isStart)
 }
 
 ;--------------------------------------------------------------------
@@ -656,7 +1122,7 @@ AcBgStart(followCursor := false, button := "L", interval := 50, cancelOnMove := 
     AC_BgRunning  := true
 
     SetTimer(AcBgTick, -1)         ; 负值 = 只触发一次，之后由 AcBgTick 自己续期
-    AcBgTip(AcBgStartText(), mx, my)
+    AcBgTipState(AcBgStartText(), mx, my, true)
 }
 
 ;--------------------------------------------------------------------
@@ -669,7 +1135,7 @@ AcBgStop(reason := "停止") {
         return
     AC_BgRunning := false
     SetTimer(AcBgTick, 0)
-    AcBgTip("连点器[停止]", AC_BgScreenX, AC_BgScreenY)
+    AcBgTipState("连点器[停止]", AC_BgScreenX, AC_BgScreenY, false)
 }
 
 ;--------------------------------------------------------------------

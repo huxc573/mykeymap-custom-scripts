@@ -199,7 +199,7 @@ RC_HoldAlphaPct := 20       ; 状态提示的**默认透明度**(%)：20 = 20% �
 RC_HoldMargin   := 14       ; 贴**屏幕左上角**的留白(像素)：x / y 都用它
 RC_InfoMinMs    := 60       ; 第 3/4 行(当前事件)的最小重绘间隔(ms)，密集事件别把钩子拖慢
 RC_AskSaveOnStop := false   ; 录完（**用户主动停**）要不要问"保存成脚本文件" —— 默认不问；
-                            ;   开了的话，框上的默认按钮是"不保存"
+                            ;   询问框里勾/取消"以后都按这次来"会改写它（本次会话内记住，不落盘）
 RC_AskLoadOnEmpty := true   ; 按回放但手里没内容时，问不问"去加载一个脚本" —— 默认问；
                             ;   框上的默认按钮是"加载"
 RC_SaveTag      := "MyKeymap KeyRecorder"   ; 写进脚本文件当"身份证"，加载时对不上就拒收
@@ -211,6 +211,23 @@ RC_FlashIdle  := 200        ; 判定"用户动过了"的阈值(ms)，别调小 �
 RC_FlashPoll  := 100        ; 上面这个判定的轮询间隔(ms)
 RC_FlashArmed := false      ; 两段式判定的第 2 段是否已武装
 RC_FlashT     := 0          ; 这条状态条出现的时刻(A_TickCount)，算兜底用
+RC_PlayPaused := false      ; 回放被"再按一次回放键"暂停中（不是停止，按回放键继续）
+RC_RunId      := 0          ; 回放"场次"编号，每开跑/续跑 +1（见 RecPlay 尾部的收尾判定）
+RC_PlayHit    := 0          ; 上次按回放键的时刻（防按住不放的重复按键）
+
+; ========== 记住上一次的选择（只活在本进程里，不落盘） ==========
+;   "回放模式/设置保持上一次"、"录制模式保持上一次"靠这几项；
+;   "录完问不问保存"也记上一次的答案（见 RC_AskSaveOnStop）。
+RC_LastSpeedPct := ""       ; 上次回放的倍速（给询问框当默认值，文本框里就是它）
+RC_LastLoops    := false    ; 上次勾没勾"循环播放"
+RC_LastCount    := 1        ; 上次的次数
+RC_LastRecMove  := true     ; 上次录制勾没勾"录制鼠标移动"
+RC_LastAskSave  := false    ; 上次录制勾没勾"录完后询问是否保存"（起始默认不勾）
+RC_AskSaveMem   := ""       ; 上次对"录完要不要问保存"的回答：""=还没答过 / true / false
+
+; 回放框宽度（里面那排"循环/次数/倍速"要这么宽；其余两个框按内容自己算）
+RC_AskW         := 366
+RC_ConfirmY     := 44           ; 确认框按钮行的 y（文字 12..28，留 16 的间隔）
 
 ; ========== 内部状态 ==========
 RC_Rec       := false      ; 正在录制
@@ -239,6 +256,11 @@ RC_HoldInfo  := ""         ; 第 3/4 行（当前事件：按键+时长一行 + 
 RC_InfoT     := 0          ; 上次重绘事件的时刻(QPC ms)，节流用
 RC_LastDir   := ""         ; 上次存/取脚本用的目录（只在本次会话里记；没记就退回模块目录\scripts）
 RC_Home      := ""         ; 本模块所在目录，载入时定一次（见 RcHomeDir）
+RC_RunSp     := 1          ; 当前这次回放用的倍速（暂停后继续时沿用）
+RC_RunRounds := 1          ; 当前这次回放的总轮数（0 = 无限）
+RC_RunMode   := "Event"    ; 当前这次回放用的送键模式
+RC_RunAlpha  := ""         ; 当前这次回放用的状态条透明度(%)，"" = 模块默认
+RC_Resume    := false      ; 本次 RecPlay 是"从暂停接着放"（不走 800ms 缓冲）
 
 ;--------------------------------------------------------------------
 ; 当前时间(ms，QPC)。RC_Freq 只取一次
@@ -444,18 +466,28 @@ RcHoldPaint() {
 ;--------------------------------------------------------------------
 ; 拼装状态提示（空的整行不显示）—— 单独成函数只为能直接被探针调
 ;   标题 / 倍速+轮次(回放才有) / 按键+时长 / 坐标   —— **最多 4 行**
-;   第 2 行形如：  0.8x [1/99]   或   0.8x [1/∞]
+;   第 2 行形如：  0.8x [1/99]   或   0.8x [1/∞]（暂停时行尾再挂一个 ⏸ 标记）
 ;   第 3、4 行由 RcEventInfo 一次给出（内部带 `n）
 ;   模式文字（"循环/次数"）不写了 —— 方括号里的分母是不是 ∞ 一看就知道。
 ;--------------------------------------------------------------------
 RcHoldCompose() {
-    global RC_HoldTitle, RC_HoldSpeed, RC_HoldRound, RC_HoldTotal, RC_HoldInfo
+    global RC_HoldTitle, RC_HoldSpeed, RC_HoldRound, RC_HoldTotal, RC_HoldInfo, RC_PlayPaused
     text := RC_HoldTitle
     if (RC_HoldSpeed != "")
-        text .= "`n" RC_HoldSpeed " [" RC_HoldRound "/" RC_HoldTotal "]"
+        text .= "`n" RC_HoldSpeed " [" RC_HoldRound "/" RC_HoldTotal "]" . (RC_PlayPaused ? " ⏸" : "")
     if (RC_HoldInfo != "")
         text .= "`n" RC_HoldInfo
     return text
+}
+
+;--------------------------------------------------------------------
+; 暂停 / 继续：只改状态条上的标记（暂停那一刻当前事件那一行已经不准了，顺手清掉）
+;--------------------------------------------------------------------
+RcHoldSetPaused(on) {
+    global RC_HoldInfo, RC_HoldPainted
+    RC_HoldInfo := ""
+    RC_HoldPainted := ""               ; 强制重画：否则"内容没变"会直接 return
+    RcHoldPaint()
 }
 
 ;--------------------------------------------------------------------
@@ -598,6 +630,19 @@ RcVkName(vk, sc) {
 }
 
 ;--------------------------------------------------------------------
+; 同一个键"再加一个 Shift"的名字；查不到就返回键名本身（不需要换）
+;   用途见 RcSendKey 的【坑 R21】
+;--------------------------------------------------------------------
+RcShiftKey(key) {
+    try {
+        n := GetKeyName("+" . key)
+        if (n != "" && n != key)
+            return n
+    }
+    return key
+}
+
+;--------------------------------------------------------------------
 ; 当时按住的修饰键 -> Send 前缀
 ;--------------------------------------------------------------------
 RcModPrefix() {
@@ -626,6 +671,8 @@ RcPush(ev, t := "") {
         return
     }
     ev.t := (t = "") ? (RcNow() - RC_T0) : t
+    if (ev.type = "k" && ev.HasProp("key"))
+        ev.key2 := RcShiftKey(ev.key)     ; shift 版键名（探针/兼容用；实际回放走 vk/sc 算字符）
     RC_Ev.Push(ev)
     RcHoldInfoSet(RcEventInfo(ev))    ; 状态提示事件行：实时刷按键/坐标/时长
 }
@@ -651,7 +698,8 @@ RcKeyDown(ih, vk, sc) {
         return                                   ; 纯修饰键只当状态，见【坑 R3】
     if (IsObject(RC_Ignore) && RC_Ignore.Has(StrLower(key)))
         return                                   ; 启停键自己，见【坑 R1】
-    RcPush({type: "k", key: key, mods: RcModPrefix()})
+    ; vk/sc 一并存下来：回放时靠它算出"实际打出的字符"（见【坑 R21】）
+    RcPush({type: "k", key: key, mods: RcModPrefix(), vk: vk, sc: sc})
 }
 
 ;--------------------------------------------------------------------
@@ -808,6 +856,7 @@ RcHookOff() {
 ;--------------------------------------------------------------------
 RecToggle(ignoreKey := "", recordMove := "", alphaPct := "") {
     global RC_Rec, RC_Play, RC_Ev, RC_Ignore, RC_T0, RC_RecMove
+    global RC_AskSaveOnStop, RC_AskSaveMem
 
     if (RC_Rec || RC_Play) {          ; 录制中 / 回放中 -> 本次调用当"停"
         RecStop()
@@ -815,10 +864,13 @@ RecToggle(ignoreKey := "", recordMove := "", alphaPct := "") {
     }
 
     if (recordMove == "") {           ; 没指定 -> 弹框问（取消 = 这次不录）
-        mv := RcAskMoveAsk()
-        if (mv == "")
+        o := RcAskMoveAsk()
+        if (!o)
             return
-        recordMove := mv
+        recordMove := o.move
+        ; 每次开录都按"这一次"的勾选覆盖：勾着问、不勾不问（不再二次推断）
+        RC_AskSaveOnStop := o.askSave ? true : false
+        RC_AskSaveMem := ""
     }
 
     ; 忽略集合：触发本函数的那个热键 + 调用方显式指定的
@@ -843,11 +895,14 @@ RecToggle(ignoreKey := "", recordMove := "", alphaPct := "") {
 ; 对外：强制停止 —— 录制停录、回放停跑，都没在跑就是空操作
 ;   安全键接这个；回放中途按下去会立刻停（靠 RC_Abort，见【坑 R5】）
 ;   quiet=true 供内部调用（回放前先收掉录制）—— 别闪一下"脚本[停止]"
+;   pause=true 是"暂停"（回放中再按一次回放键就走这里）：只让它停在原地，
+;             不撤状态条、不弹"停止"，下次按回放键接着放（见 RecPlay 的续放分支）
 ;--------------------------------------------------------------------
-RecStop(quiet := false) {
-    global RC_Rec, RC_Play, RC_Abort, RC_Ev, RC_RecMove, RC_AskSaveOnStop
+RecStop(quiet := false, pause := false) {
+    global RC_Rec, RC_Play, RC_Abort, RC_Ev, RC_RecMove, RC_AskSaveOnStop, RC_PlayPaused
     wasRec := RC_Rec
     wasPlay := RC_Play
+    wasPaused := RC_PlayPaused        ; 暂停中按安全键 = 从暂停直接彻底停（别当空操作放过去）
     RC_Rec := false                   ; 先落标志：钩子拆掉过程中漏进来的事件一律不入库
     RC_Abort := true
     if (wasRec) {
@@ -855,15 +910,34 @@ RecStop(quiet := false) {
         RcHookOff()
         RC_RecMove := false
     }
-    if (!wasRec && !wasPlay)
+    if (pause && wasPlay) {
+        RC_Play := false              ; 立刻落状态：暂停期间是"没在跑、但可以续放"
+        RC_PlayPaused := true         ; 停在这儿等"继续"；状态条留在屏上，并标一下
+        RcHoldSetPaused(true)
+        return
+    }
+    RC_PlayPaused := false
+    if (!wasRec && !wasPlay && !wasPaused)
         return                        ; 都没在跑：纯空操作，别弹提示
     RcHoldOff()
     if (!quiet)
         RcTip("脚本[停止]")
     ; quiet=true 是内部收尾（回放前先收录制 / 录满自动停）—— 那两种都别弹保存询问，
     ;   免得机器自己把框推到你脸上。只有"录完之后你自己按的停"才问。
-    if (wasRec && !quiet && RC_AskSaveOnStop && RC_Ev.Length)
+    if (wasRec && !quiet && RcAskSaveOnStop())
         RcAskSaveAfterRec()
+}
+
+;--------------------------------------------------------------------
+; 这次录完到底要不要问保存 —— 判定拆出来，方便探针直接验
+;   RC_AskSaveOnStop 决定"默认问不问"；只要 RC_AskSaveMem 有过明确回答，
+;   就以那次回答为准（本次会话内一直沿用）。
+;--------------------------------------------------------------------
+RcAskSaveOnStop() {
+    global RC_AskSaveOnStop, RC_AskSaveMem
+    if (RC_AskSaveMem = "")
+        return RC_AskSaveOnStop ? true : false
+    return RC_AskSaveMem ? true : false
 }
 
 ;--------------------------------------------------------------------
@@ -921,6 +995,18 @@ RcFmtDur(ms) {
 }
 
 ;--------------------------------------------------------------------
+; 文字宽度估算（s9 / Microsoft YaHei UI）：汉字与全角 ~13px、ASCII ~7px
+;   只给按钮定宽用 —— 按钮"按文字来"就是靠这个，别用等分整行
+;--------------------------------------------------------------------
+RcTextW(s) {
+    n := 0
+    for c in StrSplit(String(s), "") {
+        n += (Ord(c) > 0x2E7F) ? 13 : 7
+    }
+    return n
+}
+
+;--------------------------------------------------------------------
 ; 挂起 + 弹框 + 等关（两个询问框共用）
 ;   Suspend 必须在**建框之后**调 —— 建框抛异常时就不会把脚本留在挂起态；
 ;   原值要还回去（MyKeymap 的 SendMouseButton 用裸 Suspend 切换）。
@@ -929,7 +1015,10 @@ RcShowModal(g, opts, focusCtl := 0) {
     wasSuspended := A_IsSuspended
     Suspend(true)                        ; 见【坑 R10】
     try {
-        g.Show(opts)
+        if IsObject(opts)
+            RcAskShow(opts)              ; 传 st = 先按内容定尺寸再显示（回放框）
+        else
+            g.Show(opts)
         WinActivate("ahk_id " g.Hwnd)    ; 防"窗口没拿到焦点、键盘打在别的窗口上"
         if (IsObject(focusCtl))
             try focusCtl.Focus()         ; 设焦点（如次数框），开框就能直接打数字
@@ -940,27 +1029,56 @@ RcShowModal(g, opts, focusCtl := 0) {
 }
 
 ;--------------------------------------------------------------------
-; 开录前的询问框：这次要不要连鼠标移动一起录
-;   返回 true(录移动) / false(不录) / ""(取消，不开录)
+; 开录前的询问框：这次的录制选项
+;   返回 {move, askSave}；取消 = 返回 0（不开录）
+;   两个勾选都**沿用上一次**，不写就不要每次问。
 ;--------------------------------------------------------------------
 RcAskMoveAsk() {
-    st := {move: true, ok: false, g: 0, cbMove: 0}
+    global RC_LastRecMove, RC_LastAskSave
+    st := {move: (RC_LastRecMove ? true : false),
+           askSave: (RC_LastAskSave ? true : false),
+           ok: false, g: 0, cbMove: 0, cbSave: 0, btnOK: 0, w: 0, h: 0}
     RcAskMoveGui(st)
     if (!st.g)
-        return ""
-    RcShowModal(st.g, "w344 h112 Center")
+        return 0
+    ; 焦点给"开始录制"：不给的话落在第一个勾选框上，那行文字会被焦点框反白（很难看）
+    RcShowModal(st.g, "w" st.w " h" st.h " Center", st.btnOK)
     if (!st.ok)
-        return ""
-    return st.move ? true : false
+        return 0
+    RC_LastRecMove := st.move ? true : false      ; 记住，下次开录直接沿用
+    RC_LastAskSave := st.askSave ? true : false
+    return {move: RC_LastRecMove, askSave: RC_LastAskSave}
 }
 
 RcAskMoveGui(st) {
+    ; 文案先定下来：宽度按"最宽那一行"算，别拍一个固定值 —— 宽了右边一片空，
+    ; 窄了灰色说明被切掉（原来的 h344/w312 就把最后两个字切了）。
+    ;   勾选框那行还要多算 21px（方框本身）。
+    c1 := "录制鼠标移动"
+    c2 := "录完后询问是否保存"
+    h1 := "不勾 = 只记按键/点击/滚轮，拖拽仍记"
+    h2 := "不勾 = 录完直接停，不弹框"
+    need := 0
+    for s in [h1, h2]
+        need := Max(need, RcTextW(s))
+    for s in [c1, c2]
+        need := Max(need, RcTextW(s) + 21)
+    w := need + 40                          ; 左右各 16，另留 8 给估算误差
+    yBtn := 96                              ; 上边距 12，四行内容压紧之后
+
     g := Gui("+AlwaysOnTop -MinimizeBox -MaximizeBox", "开始录制")
     g.SetFont("s9", "Microsoft YaHei UI")
-    cb := g.AddCheckBox("x16 y18 w312 Checked", "录制鼠标移动")
-    g.AddText("x16 y46 w312 cGray", "不勾 = 只记按键/点击/滚轮；拖拽的按下和轨迹始终会记")
-    btnOK := g.AddButton("x16 y76 w152 h28 Default", "开始录制")
-    btnNo := g.AddButton("x176 y76 w152 h28", "取消")
+    cb := g.AddCheckBox("x16 y12 w" (w - 32) (st.move ? " Checked" : ""), c1)
+    g.AddText("x16 y30 w" (w - 32) " cGray", h1)
+    cb2 := g.AddCheckBox("x16 y54 w" (w - 32) (st.askSave ? " Checked" : ""), c2)
+    g.AddText("x16 y72 w" (w - 32) " cGray", h2)
+
+    ; 按钮按文字定宽 + 整排居中（同 RcConfirmButtons / 回放框）
+    bw1 := RcTextW("开始录制") + 24
+    bw2 := RcTextW("取消") + 24
+    bx := (w - (bw1 + 10 + bw2)) // 2
+    btnOK := g.AddButton("x" bx " y" yBtn " w" bw1 " h28 Default", "开始录制")
+    btnNo := g.AddButton("x" (bx + bw1 + 10) " y" yBtn " w" bw2 " h28", "取消")
 
     btnOK.OnEvent("Click", (*) => RcAskMoveTake(st))
     btnNo.OnEvent("Click", (*) => g.Destroy())
@@ -968,11 +1086,16 @@ RcAskMoveGui(st) {
     g.OnEvent("Escape", (*) => g.Destroy())
 
     st.g := g
+    st.w := w
+    st.h := yBtn + 28 + 12                  ; 客户区高度 = 按钮底 + 12（底部留白统一 12）
     st.cbMove := cb
+    st.cbSave := cb2
+    st.btnOK := btnOK
 }
 
 RcAskMoveTake(st) {
     st.move := st.cbMove.Value
+    st.askSave := st.cbSave.Value
     st.ok := true
     st.g.Destroy()
 }
@@ -992,63 +1115,198 @@ RcAskMoveTake(st) {
 ;--------------------------------------------------------------------
 RcAsk() {
     global RC_Ev, RC_SpeedMin, RC_SpeedMax, RC_CountMax
+    global RC_LastSpeedPct, RC_LastLoops, RC_LastCount, RC_AskW
     if (!RC_Ev.Length) {
         RcTip("没内容")
         return 0
     }
 
-    st := {loops: false, count: "1", speed: "1", ok: false, g: 0, edCount: 0}
+    ; 默认值 = 上一次的选择（本进程内记住；从没选过就是 循环关 / 1 遍 / 1x）
+    cnt0 := RC_LastCount
+    cnt0 := RcClamp(Round(IsNumber(cnt0) ? cnt0 + 0 : 1), 1, RC_CountMax)
+    sp0  := RcSpeedStr(IsNumber(RC_LastSpeedPct) ? RC_LastSpeedPct + 0 : 1)
+    st := {loops: (RC_LastLoops ? true : false), count: String(cnt0), speed: sp0,
+           ok: false, g: 0, edCount: 0, fromLoad: false}
+
     RcAskGui(st)
     if (!st.g)
         return 0
+    RcAskLoopUI(st)                        ; 循环勾着的话，开框就把次数框禁掉
 
-    RcShowModal(st.g, "w366 h150 Center", st.edCount)
+    RcShowModal(st.g, st, st.edCount)       ; 尺寸按内容算，见 RcAskShow
     if (!st.ok)
         return 0
 
-    sp := st.speed + 0                       ; 非数字 -> 0
-    if (!IsNumber(sp) || sp <= 0)
+    sp := RcParseSpeed(st.speed)             ; 存的是 "1x" / "0.8x" 形态，必须剥掉 x 再转数
+    if (sp <= 0)
         sp := 1.0
-    sp := RcClamp(sp + 0, RC_SpeedMin, RC_SpeedMax)
+    sp := RcClamp(sp, RC_SpeedMin, RC_SpeedMax)
 
     cnt := st.count + 0
     if (!IsNumber(cnt) || cnt < 1)
         cnt := 1
     cnt := RcClamp(Round(cnt), 1, RC_CountMax)
 
-    return {loops: (st.loops ? true : false), count: cnt, speed: sp}
+    ; 记住这次的设置 —— 下次开框就是这一套
+    RC_LastLoops := (st.loops ? true : false)
+    RC_LastCount := cnt
+    RC_LastSpeedPct := sp
+
+    return {loops: RC_LastLoops, count: cnt, speed: sp, fromLoad: st.fromLoad ? true : false}
 }
 
 ;--------------------------------------------------------------------
 ; 建询问框 + 接线（**不 Show**），状态写进传入的 st
+;   边框三段：头部（内容概要）/ 中间（循环·次数·倍速）/ 底部按钮行
+;   底部：开始回放 | 加载… | 保存… | 取消 —— 加载/保存直接调 RecLoad / RecSave
+;        （它们会弹出系统文件框；确认后本框也就关掉了，回到正常流程）
 ;--------------------------------------------------------------------
 RcAskGui(st) {
-    global RC_Ev, RC_CountMax
+    global RC_Ev, RC_CountMax, RC_AskW
+    w := RC_AskW
+    bw := 8                                ; 按钮之间的间距（宽度按文字算，见下）
+
     g := Gui("+AlwaysOnTop -MinimizeBox -MaximizeBox", "键鼠回放")
     g.SetFont("s9", "Microsoft YaHei UI")
-    g.AddText("x16 y14 w336", "已录：" RC_Ev.Length " 条，时长约 " RcFmtDur(RcTotalMs()))
-    cbLoop := g.AddCheckBox("x16 y46 w90", "循环播放")
-    g.AddText("x108 y48 w34", "次数")
-    edCount := g.AddEdit("x144 y45 w54 Number", "1")
-    udCount := g.AddUpDown("x199 y45 w18", "1-" RC_CountMax)   ; 必须紧跟上面的 Edit，挂载关系靠这个
-    g.AddText("x226 y48 w34", "倍速")
-    cbSpeed := g.AddComboBox("x262 y44 w88", ["0.3", "0.5", "0.8", "1", "1.5", "2", "3", "5", "10"])
-    cbSpeed.Text := "1"
-    g.AddText("x16 y74 w336 cGray", "勾上循环=一直放到底（次数框作废）；不勾=放「次数」遍")
-    btnOK := g.AddButton("x16 y104 w156 h30 Default", "开始回放")
-    btnNo := g.AddButton("x192 y104 w156 h30", "取消")
+    txtHead := g.AddText("x16 y12 w336", "已录：" RC_Ev.Length " 条，时长约 " RcFmtDur(RcTotalMs()))
+    cbLoop := g.AddCheckBox("x16 y40 w90", "循环播放")
+    g.AddText("x108 y42 w34", "次数")
+    edCount := g.AddEdit("x144 y39 w54 Number", st.count)
+    udCount := g.AddUpDown("x199 y39 w18", "1-" RC_CountMax)   ; 必须紧跟上面的 Edit，挂载关系靠这个
+    g.AddText("x226 y42 w34", "倍速")
+    cbSpeed := g.AddComboBox("x262 y38 w88", ["0.3", "0.5", "0.8", "1", "1.5", "2", "3", "5", "10"])
+    cbSpeed.Text := st.speed
+    ; 原来这里还有一行灰色说明（"勾上循环=…；不勾=…"）—— 纯属把窗口撑高：
+    ; 勾上循环时次数框本来就会被禁用，一眼就看得出来。删掉。
+
+    ; 按钮**按文字长度**定宽 + 整排水平居中（不再一律等分整行 —— 那样每颗都过宽）
+    { ; 排版块
+        labels := ["开始回放", "加载...", "保存...", "取消"]
+        ws := []
+        sum := 0
+        for lb in labels {
+            wIt := RcTextW(lb) + 24                  ; 左右各 12px 内边距
+            ws.Push(wIt)
+            sum += wIt
+        }
+        sum += 3 * bw                                ; 三个 gap
+        bx := (w - sum) // 2
+        btns := []
+        for i, lb in labels {
+            btns.Push(g.AddButton("x" bx " y74 w" ws[i] " h28" (i = 1 ? " Default" : ""), lb))
+            bx += ws[i] + bw
+        }
+        btnOK := btns[1]
+        btnLd := btns[2]
+        btnSv := btns[3]
+        btnNo := btns[4]
+    }
+
+    if (st.loops)
+        cbLoop.Value := 1
 
     btnOK.OnEvent("Click", (*) => RcAskTake(st))
+    btnLd.OnEvent("Click", (*) => RcAskLoad(st))
+    btnSv.OnEvent("Click", (*) => RcAskSave(st))
     btnNo.OnEvent("Click", (*) => g.Destroy())
     g.OnEvent("Close", (*) => g.Destroy())
     g.OnEvent("Escape", (*) => g.Destroy())
     cbLoop.OnEvent("Click", (*) => RcAskLoopUI(st))
 
     st.g := g
+    st.txtHead := txtHead
+    st.btnOK := btnOK
+    st.btnLd := btnLd
+    st.btnSv := btnSv
+    st.btnNo := btnNo
     st.edCount := edCount
     st.cbLoop := cbLoop
     st.cbSpeed := cbSpeed
     st.udCount := udCount
+    st.h := 114                              ; 兜底值，真正的高度由 RcAskShow 按内容算
+}
+
+;--------------------------------------------------------------------
+; 按内容算窗口高度 + 把按钮行挪到底部
+;   标题那行只在从「没有脚本」框加载后才有字 —— 空的那行要占位但不留白，
+;   所以整块内容往下压到 y=14，按钮行跟着往上收。
+;   （Gui 的控件位置是 Add 时定死的，Show 那次算的高度在换内容后会作废，得自己算。）
+;--------------------------------------------------------------------
+;--------------------------------------------------------------------
+; 显示回放框（Show + 按内容收高度）
+;   【坑 R25】`Gui` 的 `Show("w.. h..")` 里的 h 是**客户区**尺寸，而 GetPos 量的是**整窗**
+;   （本机要 +37px 边框/标题）。所以"想矮多少"必须用**相对量**：整窗实测高度减去
+;   内容区没用到的那一截，不能拿客户区数值直接减窗口高度。
+;   标题行（"已录：N 条…"）为空时，它连同下面 26px 一起收掉。
+;--------------------------------------------------------------------
+RcAskShow(st) {
+    global RC_AskW
+    st.g.Show("w" RC_AskW " h114 Center")     ; 先按"有标题"的高度出框
+    try st.g.GetPos(&gx, &gy, &gw, &gh)
+    catch
+        return
+
+    ; —— 布局按内容重算（不再依赖"内容到哪就自然收"，那个在本机靠不住）——
+    ;   标题行（已录：N 条…）为空 = 从「没有脚本」框加载进来的那条路，整块上移 28px
+    yHead := 12
+    if (Trim(st.txtHead.Text) = "") {
+        st.txtHead.Move(16, -40)                 ; 挪出可视区（未 Show 的控件 Hide 不可靠）
+        yHead := -16
+    }
+    yRow := yHead + 28                           ; 循环/次数/倍速
+    yBtn := yHead + 62                           ; 按钮行
+    for ctl in [st.cbLoop, st.edCount, st.udCount, st.cbSpeed] {
+        try {
+            ctl.GetPos(&x)
+            ctl.Move(x, yRow + ((ctl.Type = "CheckBox" || ctl.Type = "ComboBox") ? -1 : 0))
+        }
+    }
+    for ctl in [st.btnOK, st.btnLd, st.btnSv, st.btnNo] {
+        try {
+            ctl.GetPos(&x)
+            ctl.Move(x, yBtn)
+        }
+    }
+
+    ; 高度 = 按钮底 + 12。**Show 的 h 是客户区**，直接给这个数就对了；
+    ; 千万别再拿 GetPos 的整窗高去 Move —— Move 的 w/h 是整窗尺寸（见【坑 R27】），
+    ; 原来那行 `Move(..., gw, st.h)` 把客户区 156 当整窗高用，切掉了 21px 按钮。
+    st.h := yBtn + 28 + 12
+    ; 居中交给 Show 的 Center —— **别自己拿 A_ScreenWidth 减 GetPos 的宽去算**：
+    ; 这台机器上 A_ScreenWidth 是物理像素(2880)，GetPos 给的是 DPI 虚拟化后的值，
+    ; 两套量纲一减就跑偏，框会跑到屏幕右下角（见【坑 R28】）。
+    st.g.Show("h" st.h " Center")
+}
+
+;--------------------------------------------------------------------
+; 「加载...」：先关框（别让系统文件框压在自己的模态框上），再调 RecLoad
+;   载入成功 -> fromLoad=true、ok=true：外面照常按"开始回放"往下走
+;                 （勾着的循环/次数/倍速仍然生效，跟手动开框一样）
+;   载入取消/失败 -> ok 保持 false，这次回放就到此为止（不偷偷开跑）
+;--------------------------------------------------------------------
+RcAskLoad(st) {
+    st.g.Destroy()
+    if (RecLoad()) {
+        st.fromLoad := true
+        st.ok := true
+    }
+}
+
+;--------------------------------------------------------------------
+; 没有内容时的框：只给两路 —— 「加载...」/「取消」，没内容也没法直接回放
+;   （上一版在这里多塞了第三颗"取消"，两颗按钮都叫取消，纯属多余 —— 已删）
+;--------------------------------------------------------------------
+RcAskNoContent() {
+    return RcConfirm("没有脚本", "当前没有录好的内容，要加载一个脚本文件吗？",
+                     "加载...", "取消", true)
+}
+
+;--------------------------------------------------------------------
+; 「保存...」：关框 -> RecSave；存完框不再回来（存的是"开始回放"时那份内容）
+;--------------------------------------------------------------------
+RcAskSave(st) {
+    st.g.Destroy()
+    RecSave()
 }
 
 ;--------------------------------------------------------------------
@@ -1129,27 +1387,49 @@ RcDefaultName() {
 ;   ★ Suspend 由 RcShowModal 负责（见【坑 R10】），这里只管建框
 ;--------------------------------------------------------------------
 RcConfirm(title, text, yesLabel, noLabel, defaultYes := true) {
-    st := {yes: false, g: 0}
+    st := {yes: false, g: 0, w: 0, h: 0}
     RcConfirmGui(st, title, text, yesLabel, noLabel, defaultYes)
     if (!st.g)
         return false
-    RcShowModal(st.g, "w380 h132 Center")
+    RcShowModal(st.g, "w" st.w " h" st.h " Center")
     return st.yes
 }
 
+;--------------------------------------------------------------------
+; 尺寸全按内容算（宽度取"文字"与"按钮行"里较宽的那个，高度 = 按钮底 + 16）
+;   别再写死 380x124 —— 那套会留 32px 底部空白，文字短时右边还一片空。
+;--------------------------------------------------------------------
 RcConfirmGui(st, title, text, yesLabel, noLabel, defaultYes) {
+    wBtn := RcTextW(yesLabel) + 24 + 10 + RcTextW(noLabel) + 24
+    w := Max(RcTextW(text), wBtn) + 44       ; 左右各 16，另留 12 给估算误差
     g := Gui("+AlwaysOnTop -MinimizeBox -MaximizeBox", title)
     g.SetFont("s9", "Microsoft YaHei UI")
-    g.AddText("x16 y16 w348", text)
-    yOpt := defaultYes ? " Default" : ""
-    nOpt := defaultYes ? "" : " Default"
-    btnYes := g.AddButton("y64 w162 h28" yOpt, yesLabel)
-    btnNo  := g.AddButton("x190 y64 w174 h28" nOpt, noLabel)
-    btnYes.OnEvent("Click", (*) => RcConfirmTake(st, true))
-    btnNo.OnEvent("Click", (*) => RcConfirmTake(st, false))
+    txt := g.AddText("x16 y12 w" (w - 32), text)
+    RcConfirmButtons(g, st, yesLabel, noLabel, defaultYes, w)
     g.OnEvent("Close", (*) => g.Destroy())
     g.OnEvent("Escape", (*) => g.Destroy())
     st.g := g
+    st.txt := txt
+    st.w := w
+    st.h := RC_ConfirmY + 28 + 12            ; 按钮 y h28 + 底部 12
+}
+
+;--------------------------------------------------------------------
+; 按钮行：按文字定宽 + 整排居中。**全部显式给 x + 宽度**
+;   【坑 R24】原来前两个按钮只写了宽度没写 x，依赖"自动按序排"：两个按钮时没事，
+;   横排到边界后第三个会被挤到下一行 —— "没有脚本"框正是这样。
+;--------------------------------------------------------------------
+RcConfirmButtons(g, st, yesLabel, noLabel, defaultYes, w) {
+    w1 := RcTextW(yesLabel) + 24
+    w2 := RcTextW(noLabel) + 24
+    gap := 10
+    x1 := (w - (w1 + gap + w2)) // 2
+    yOpt := defaultYes ? " Default" : ""
+    nOpt := defaultYes ? "" : " Default"
+    btnYes := g.AddButton("x" x1 " y" RC_ConfirmY " w" w1 " h28" yOpt, yesLabel)
+    btnNo  := g.AddButton("x" (x1 + w1 + gap) " y" RC_ConfirmY " w" w2 " h28" nOpt, noLabel)
+    btnYes.OnEvent("Click", (*) => RcConfirmTake(st, true))
+    btnNo.OnEvent("Click", (*) => RcConfirmTake(st, false))
 }
 
 RcConfirmTake(st, yes) {
@@ -1287,55 +1567,117 @@ RecLoad(path := "", andPlay := false) {
 ;         可选 "Input" / "Play" / "Text"，由 RcSend() 分派
 ;   alphaPct 状态提示的透明度(%)。**不写 = 用模块默认 RC_HoldAlphaPct(20)**；
 ;            0 = 完全不透明，100 = 全透。config.json 里传的就是这个。
+;
+; 【回放中再按一次 = 暂停】按回放键走 RecStop(false, true)：停在这一刻、状态条
+;   还挂着（行尾带 ⏸），再按一次从原地接着放（见下面的续放分支）。
+;   安全键 `\` 仍然是**彻底停止**（RecStop），两者别混。
+;   续放用的倍速/次数/模式就是本次暂停前那一套，行为跟"一直没停"完全一样；
+;   续放不走那 800ms 缓冲（慢速时人可能已经就位了，再等反而像没反应）。
 ;--------------------------------------------------------------------
 RecPlay(speed := "", loops := false, count := 1, mode := "Event", alphaPct := "") {
-    global RC_Ev, RC_Play, RC_Abort, RC_Rec, RC_AskLoadOnEmpty
+    global RC_Ev, RC_Play, RC_Abort, RC_Rec, RC_AskLoadOnEmpty, RC_PlayPaused, RC_RunId, RC_PlayHit
     global RC_SpeedMin, RC_SpeedMax, RC_CountMax, RC_StartDelayMs
+    global RC_RunSp, RC_RunRounds, RC_RunMode, RC_RunAlpha, RC_Resume
 
     if (RC_Rec) {                 ; 还在录就先停，别把回放的键录进去
         RecStop(true)             ; 安静收尾：直接进"回放中"，不要闪一下[停止]
         Sleep(200)
     }
-    if (RC_Play) {                ; 已经在放 -> 当"停"
-        RecStop()
+    RC_Resume := false
+    ; 按住 `]` 不放会一直重复触发 —— 没有这一道防线就会"暂停/续放"每 30ms 来回切
+    if ((RC_Play || RC_PlayPaused) && (A_TickCount - RC_PlayHit < 250))
+        return
+    if (RC_Play) {                ; 正在放 -> 本次调用当"暂停"（再按一次继续）
+        RC_PlayHit := A_TickCount
+        RecStop(false, true)
         return
     }
-    if (!RC_Ev.Length) {           ; 手里没内容 —— 问一句要不要去加载脚本（见 RC_AskLoadOnEmpty）
-        if (!RC_AskLoadOnEmpty) {
-            RcTip("没内容")
-            return
-        }
-        if (!RcConfirm("没有脚本", "当前没有录好的内容，要加载一个脚本文件吗？", "加载...", "取消", true))
-            return
-        if (!RecLoad())            ; 载入失败 / 在框里取消了 -> 这次回放就算了
-            return
-    }
-
-    if (Trim(String(speed)) = "") {
-        o := RcAsk()
-        if (!o)
-            return
-        sp := o.speed
-        lp := o.loops
-        ct := o.count
+    if (RC_PlayPaused) {          ; 暂停中 -> 从原地接着放，设置沿用这一次的
+        RC_PlayHit := A_TickCount
+        RC_PlayPaused := false
+        RC_Resume := true
+        sp := RC_RunSp
+        lp := (RC_RunRounds = 0)
+        ct := RC_RunRounds
+        mode := RC_RunMode
+        if (alphaPct = "")
+            alphaPct := RC_RunAlpha
     } else {
-        sp := RcClamp(IsNumber(speed) ? speed + 0 : 1.0, RC_SpeedMin, RC_SpeedMax)
-        lp := loops ? true : false
-        ct := RcClamp(Round(IsNumber(count) ? count + 0 : 1), 1, RC_CountMax)
+        if (!RC_Ev.Length) {           ; 手里没内容 —— 问一句要不要去加载脚本（见 RC_AskLoadOnEmpty）
+            if (!RC_AskLoadOnEmpty) {
+                RcTip("没内容")
+                return
+            }
+            ; 只有「加载...」/「取消」两条路；关闭窗口也当取消（见 RcAskNoContent）
+            if (!RcAskNoContent())
+                return
+            if (!RecLoad())            ; 载入失败 / 在框里取消了 -> 这次回放就算了
+                return
+        }
+
+        if (Trim(String(speed)) = "") {
+            o := RcAsk()
+            if (!o)
+                return
+            sp := o.speed
+            lp := o.loops
+            ct := o.count
+        } else {
+            sp := RcClamp(IsNumber(speed) ? speed + 0 : 1.0, RC_SpeedMin, RC_SpeedMax)
+            lp := loops ? true : false
+            ct := RcClamp(Round(IsNumber(count) ? count + 0 : 1), 1, RC_CountMax)
+        }
     }
 
     ; 先清中断标志、再进"回放中"状态，最后才等那 800ms ——
     ; 顺序反了的话，缓冲期间按停止键会被后面的 RC_Abort := false 冲掉，停不下来。
     RC_Abort := false
     RC_Play := true
-    RcHoldOn("脚本[回放]", alphaPct)
+    RC_PlayHit := A_TickCount    ; 见上面的"按住不放"防线
+    RC_RunId += 1                 ; 新的"场次"：尾部收尾要靠它认自己是不是当前这一场
+    myId := RC_RunId
+    ; 这一套记下来，暂停后继续时直接用（续放不重开询问框）
+    RC_RunSp := sp
+    RC_RunRounds := lp ? 0 : ct
+    RC_RunMode := mode
+    RC_RunAlpha := alphaPct
+    if (RC_Resume)
+        RcHoldOn("脚本[回放] (续)", alphaPct)
+    else
+        RcHoldOn("脚本[回放]", alphaPct)
     ; 第 2 行：倍速 + [当前轮/总轮]（0.8x [1/99] / 0.8x [1/∞]）
     RcHoldSetMode(RcSpeedStr(sp), lp ? "∞" : ct)
-    Sleep(RC_StartDelayMs)        ; 给手离开鼠标的时间
 
-    RcRun(RcRounds(lp, ct), sp, mode)   ; 勾循环 -> 0(无限)，不勾 -> 次数
+    ; —— 长循环**必须**交给定时器线程，别在这个函数里直接跑 ——
+    ;   热键线程只要还压着 RcRun，同一个热键的第二次按下就会被
+    ;   `#MaxThreadsPerHotkey`（默认 1）直接**吞掉**，暂停键永远进不来；
+    ;   这是"按回放键没反应、但停止键好好的"的真因（见【坑 R29】）。
+    ;   定时器线程能被热键打断，第二次按下就能正常进来做暂停。
+    SetTimer(RcPlayRun.Bind(RcRounds(lp, ct), sp, mode, alphaPct, RC_Resume, myId), -1)
+}
+
+;--------------------------------------------------------------------
+; 真正跑一场（定时器线程，见【坑 R29】）
+;--------------------------------------------------------------------
+RcPlayRun(times, sp, mode, alphaPct, resume, myId) {
+    global RC_Play, RC_PlayPaused, RC_RunId, RC_StartDelayMs
+
+    if (!resume)
+        Sleep(RC_StartDelayMs)        ; 给手离开鼠标的时间（续放不缓冲）
+    if (RC_RunId != myId)
+        return                        ; 缓冲期间就被"暂停"顶掉了，这一场还没开跑
+
+    RcRun(times, sp, mode)            ; 勾循环 -> 0(无限)，不勾 -> 次数
+
+    ; —— 收尾必须分清两种情况（见【坑 R27】）——
+    ;   ① 这一帧是被"暂停"叫停的：标志和状态条都留着，等下次按回放键续放；
+    ;   ② 停的瞬间又开了新一场（暂停后马上又按）—— 我这帧是上一场的残影，
+    ;      啥都别碰，否则会把正在跑的那一场的 RC_Play / 状态条一起冲掉。
+    if (RC_RunId != myId)
+        return
     RC_Play := false
-
+    if (RC_PlayPaused)
+        return
     RcHoldOff()
     RcTip("脚本[停止]")
 }
@@ -1354,6 +1696,17 @@ RcSpeedStr(sp) {
     if (Mod(f, 10) = 0)
         return i "." (f // 10) "x"
     return i "." (f < 10 ? "0" : "") f "x"
+}
+
+;--------------------------------------------------------------------
+; "0.8x" / "1.5x" / "0.8" -> 数字；认不出返回 0
+;   【坑】`"1x" + 0` 在 v2 里直接抛 `Expected a Number but got a String`
+;   （不是"转成 0"，是抛异常）⇒ 下拉框里的值一律走这里，别写 `x + 0`。
+;--------------------------------------------------------------------
+RcParseSpeed(s) {
+    t := Trim(String(s))
+    t := RegExReplace(t, "i)\s*x\s*$", "")
+    return IsNumber(t) ? t + 0 : 0
 }
 
 ;--------------------------------------------------------------------
@@ -1398,7 +1751,8 @@ RcRun(times, speed, mode) {
                 break
             switch e.type {
                 case "k":
-                    RcSend(e.mods . "{" . e.key . "}", mode)
+                    ; 按"实际打出的字符"发（见【坑 R21】）；Text 模式没有修饰键前缀，走盲发
+                    RcSendKey(e, mode)
                 case "c":
                     MouseClick(RcClickName(e.btn), e.x, e.y, 1)   ; Speed 必须 >=1，见【坑 R6】
                 case "d":                                          ; 拖拽：按下
@@ -1454,6 +1808,133 @@ RcClickName(btn) {
         case "XButton2": return "X2"
         default:         return btn      ; WheelUp/Down/Left/Right 两边同名，直接用
     }
+}
+
+;--------------------------------------------------------------------
+; 定义一个键按下的**实际效果**（字符 + 当时的修饰键）
+;   返回 {char, shifted, ctrl, alt, win}；char 拿不到（功能键 / 退格等）= ""
+;   用途：区分"按了 Shift+= 打出 +"和"按了 + 键"，并补回被 Send 顺手加上的 Shift。
+;--------------------------------------------------------------------
+RcKeyEffect(vk, sc) {
+    ctrl := alt := win := false
+    ; 用物理键状态（就算没装钩子也读得到真实按键，不受 Send 影响）
+    if (DllCall("user32\GetKeyState", "Int", 0x11, "Short") & 0x8000)   ; VK_CONTROL
+        ctrl := true
+    if (DllCall("user32\GetKeyState", "Int", 0x12, "Short") & 0x8000)   ; VK_MENU
+        alt := true
+    if ((DllCall("user32\GetKeyState", "Int", 0x5B, "Short") & 0x8000)  ; VK_LWIN
+     || (DllCall("user32\GetKeyState", "Int", 0x5C, "Short") & 0x8000)) ; VK_RWIN
+        win := true
+    st := (DllCall("user32\GetKeyState", "Int", 0x10, "Short") & 0x8000) ? 1 : 0  ; VK_SHIFT
+
+    ; 【MAPVK 在本机全废（2026-10-30 实测）】
+    ;   `MapVirtualKeyW/Ex(vk, MAPVK_VK_TO_CHAR)` 在这台机器上只把 VK 原样吐回：
+    ;   HIWORD（该放字符的地方）永远是 0，布局句柄给 null / GetKeyboardLayout() 都一样，
+    ;   中文(中文) 布局下更拿不到字母。**改用 ToUnicodeEx**——它就是输入法/TranslateMessage
+    ;   用的那个函数，按当前布局翻译得准，空格/标点/字母全对。
+    ;   KB 状态表：全 0 = "没按 Shift"；只把 VK_SHIFT(0x10) 置成 0x80 = "按着 Shift"。
+    ;   两次各问一次，就知道 Shift 是不是这个字符必需的。
+    hkl := DllCall("user32\GetKeyboardLayout", "UInt", 0, "Ptr")
+    stOff := Buffer(256, 0)
+    stOn  := Buffer(256, 0)
+    NumPut("UChar", 0x80, stOn, 0x10)              ; VK_SHIFT 那一位
+    ch     := RcToChar(vk, sc, stOff, hkl)         ; 通常态
+    chSh   := RcToChar(vk, sc, stOn,  hkl)         ; 按着 Shift 时（很多键给 0 / 空）
+    wantShift := false
+    if (ch = "" && chSh != "") {                   ; 只有按 Shift 才出字符
+        ch := chSh
+        wantShift := true
+    }
+    ; 用户真按着 Shift 且这个键本来也能出字符（数字/标点）—— 打出的是另一半，
+    ; 这里按"当时的物理 Shift"补上；字母的 Shift 与否由字符本身决定（见上）。
+    if (ch != "" && st && !wantShift && !(Ord(ch) >= 0x61 && Ord(ch) <= 0x7A))
+        wantShift := true
+    ; 大小写字母：Send 用字符形态最稳，统一折回小写
+    if (ch != "" && Ord(ch) >= 0x41 && Ord(ch) <= 0x5A)
+        ch := Chr(Ord(ch) + 32)
+    return {char: ch, shifted: wantShift, ctrl: ctrl, alt: alt, win: win}
+}
+
+;--------------------------------------------------------------------
+; ToUnicodeEx 翻译一个键（按当前布局 + 给定的修饰键状态表）；拿不到字符返回 ""
+;--------------------------------------------------------------------
+RcToChar(vk, sc, st, hkl) {
+    if (!sc)
+        sc := DllCall("user32\MapVirtualKeyW", "UInt", vk, "UInt", 0, "UInt")   ; 0 = MAPVK_VK_TO_VSC
+    buf := Buffer(8, 0)
+    n := DllCall("user32\ToUnicodeEx", "UInt", vk, "UInt", sc, "Ptr", st
+                 , "Ptr", buf, "Int", 4, "UInt", 0, "Ptr", hkl, "Int")
+    if (n <= 0)
+        return ""
+    c := NumGet(buf, 0, "UInt")
+    if (c < 32)
+        return ""
+    return Chr(c)
+}
+
+;--------------------------------------------------------------------
+; 发一条键盘事件
+;   e {key, mods, (key2)}  -> 按当时的修饰键原样组合发出去
+;
+; 【坑 R21】MyKeymap 把大写字母/上排标点**重映射**成别的键（A -> Home 之类）。
+;   录制时 GetKeyName(vk,sc) 给的是**被映射之后**的键名（比如 Home），
+;   而当时多按的 Shift 不会进 mods（`+Home` 根本不是 Shift+Home），于是：
+;     · 'A' 录成 Home        -> 回放成了 Home（跳行首），不是打 A
+;     · Shift+'=' 打出 '+'   -> 录成 '='，回放没 Shift，只打出 '='
+;   这里按"**实际打出来的字符**"决定：拿得到字符就以字符为准（字符只由字符定，
+;   不受键盘布局钩子影响）；Shift 是**打这个字符所需的**才加，被 Send 顺手加上的补回。
+;--------------------------------------------------------------------
+RcSendKey(e, mode) {
+    ; Text 模式（SendText）不认修饰键前缀，会把前缀符当字面量打出来 —— 只能盲发字符
+    if (mode = "Text") {
+        RcSendKeyText(e)
+        return
+    }
+    ; 老脚本文件没有 vk/sc（=0）—— 那时只能按存下来的键名原样发
+    if (!e.HasProp("vk") || !e.vk) {
+        RcSend(e.mods . "{" . e.key . "}", mode)
+        return
+    }
+    ef := RcKeyEffect(e.vk, e.sc)
+    name := e.key
+    if (ef.char != "") {
+        name := ef.char
+        base := ""
+        ; 按键时正按着的快捷键修饰键要原样带上（Ctrl+S / Alt+F4 / Win+E）
+        if (ef.ctrl && !InStr(e.mods, "^"))
+            base .= "^"
+        if (ef.alt && !InStr(e.mods, "!"))
+            base .= "!"
+        if (ef.win && !InStr(e.mods, "#"))
+            base .= "#"
+        ; mods 里本来就有 Shift 的（用户真按了 Ctrl+Shift+Enter 这种组合）要保留
+        if (ef.shifted || InStr(e.mods, "+"))
+            base .= "+"
+        RcSend(base . "{" . name . "}", mode)
+        return
+    }
+    ; 没有字符可言（功能键 / 方向键 / 编辑键）—— 原样发；Shift 在 mods 里就带上
+    RcSend(e.mods . "{" . name . "}", mode)
+}
+
+;--------------------------------------------------------------------
+; Text 模式专用：SendText 只认字面文本 + {Blind}{键名}，没有修饰键前缀可言
+;   Shift 变体靠 key2（录制时算好的 shifted 键名），修饰键靠 Blind 沿用物理状态
+;--------------------------------------------------------------------
+RcSendKeyText(e) {
+    if (!e.HasProp("vk") || !e.vk) {
+        RcSend("{Blind}{" . e.key . "}", "Text")
+        return
+    }
+    ef := RcKeyEffect(e.vk, e.sc)
+    if (ef.char != "") {
+        RcSend(ef.char, "Text")
+        return
+    }
+    k := e.key
+    if (ef.shifted && e.HasProp("key2") && e.key2 != "")
+        k := e.key2
+    RcSend("{Blind}{" . k . "}", "Text")
 }
 
 ;--------------------------------------------------------------------
@@ -1541,6 +2022,10 @@ RcJsonEventStr(e) {
         s .= ',"key":"' RcJsonEsc(e.key) '"'
     if (e.HasProp("mods"))
         s .= ',"mods":"' RcJsonEsc(e.mods) '"'
+    if (e.HasProp("vk"))
+        s .= ',"vk":' RcJsonNum(e.vk)
+    if (e.HasProp("sc"))
+        s .= ',"sc":' RcJsonNum(e.sc)
     if (e.HasProp("btn"))
         s .= ',"btn":"' RcJsonEsc(e.btn) '"'
     if (e.HasProp("dir"))
@@ -1627,7 +2112,10 @@ RcMapToEv(m) {
     if (tp = "k")
         return {type: "k"
               , key: (m.Has("key") ? String(m["key"]) : "")
-              , mods: (m.Has("mods") ? String(m["mods"]) : ""), t: t}
+              , mods: (m.Has("mods") ? String(m["mods"]) : "")
+              , vk: (m.Has("vk") ? (m["vk"] + 0) : 0)     ; 老文件没有 vk/sc -> 0，回放退回"只按 key 发"
+              , sc: (m.Has("sc") ? (m["sc"] + 0) : 0)
+              , t: t}
     if (tp = "c" || tp = "d" || tp = "u")
         return {type: tp
               , btn: (m.Has("btn") ? String(m["btn"]) : "")

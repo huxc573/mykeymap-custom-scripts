@@ -1,6 +1,6 @@
 # MyKeymap 自定义脚本
 
-> **v1.1**（`VERSION` = `1.1.0` · 2026-10-07 09:22）· 变更见 [CHANGELOG.md](CHANGELOG.md)
+> **v1.2**（`VERSION` = `1.2.0` · 2026-10-30 17:20）· 变更见 [CHANGELOG.md](CHANGELOG.md)
 
 给 [MyKeymap](https://mykeymap.com) 写的三个 AutoHotkey v2 模块。全部**本地运行、不联网、不驻留后台服务**。
 
@@ -8,8 +8,8 @@
 
 | 文件 | 干什么 | 对外入口 |
 | :--- | :--- | :--- |
-| `KeyRecorder.ahk` | 键鼠录制 / 回放。可把录到的操作存成 JSON 脚本文件，之后再加载回放 | `RecToggle` / `RecPlay` / `RecSave` / `RecLoad` / `RecStop` / `RecClear` / `RecInfo` |
-| `AutoClick.ahk` | 连点器。有「前台」和「后台」两条后端：后台用窗口消息投递，不移动系统光标、不抢焦点 | `AutoClick` / `AutoClickStop` / `AutoClickProbe` |
+| `KeyRecorder.ahk` | 键鼠录制 / 回放。可把录到的操作存成 JSON 脚本文件，之后再加载回放；回放中可暂停、从原地续放 | `RecToggle` / `RecPlay` / `RecSave` / `RecLoad` / `RecStop` / `RecClear` / `RecInfo` |
+| `AutoClick.ahk` | 连点器。有「前台」和「后台」两条后端：后台用窗口消息投递，不移动系统光标、不抢焦点。带设置界面，参数存本地文件 | `AutoClickToggle` / `AutoClickSettings` / `AutoClick` / `AutoClickStop` / `AutoClickProbe` |
 | `Brightness.ahk` | 屏幕亮度调节。**只动鼠标所在的那块屏**（可用 `BR_PerMonitor` 关掉改成全屏）。两个入口：`BrightAuto` 软件优先（Gamma → 遮罩）、`BrightHw` 硬件优先（背光 → Gamma → 遮罩） | `BrightAuto` / `BrightHw` / `BrightDdc` / `BrightWmi` / `BrightGamma` / `BrightGammaReset` / `BrightRefreshGamma` / `BrightMask` / `BrightCursorRestore` |
 
 每个文件头部都有详细注释：函数签名、参数含义、返回值，以及实现时踩过的坑。
@@ -45,14 +45,36 @@
 | `*` `;` | `RecSave()` |
 | `*` `'` | `RecLoad("", true)` |
 
+`[` 录 / 再按停，`]` 回放 / 回放中再按是**暂停**（再按一次从原地续放），`\` 彻底停。`;` 存成脚本文件、`'` 加载并回放。
+回放框里另有「加载…」「保存…」按钮，录制框里有「录完后询问是否保存」勾选框（默认不勾）。
+回放模式、次数、倍速与录制的勾选都记得上一次的值 —— 只活在进程内，重载脚本后回默认。
+
 **AutoClick（连点器）**
 
 | 键位 | ahkCode |
 | :--- | :--- |
+| `Tab` 层 `*` `LCtrl` | `AutoClickToggle()` |
+| `Tab` 层 `*` `LWin` | `AutoClickSettings()` |
 | `*` `p` | `AutoClickBg(false, "L", 50, false)` |
 | `*` `LAlt` | `AutoClick(false, "R", 50, false)` |
 | `*` `LCtrl` | `AutoClick(false, "L", 50, false, 0, "front")` |
 | `*` `LWin` | `AutoClick(false, "L", 50, true)` |
+
+`AutoClickToggle` 按设置文件里的参数开/停，`AutoClickSettings` 弹设置界面。后面四行是**临时预设**：直接传参、不读设置文件，
+适合「就这一次换个参数」。两者都按同一个浮窗档位显示提示。
+
+**AutoClick 的设置文件**：`<模块目录>\scripts\autoclick.cfg`（运行时生成，UTF-8 无 BOM，可直接手改）
+
+```ini
+backend=front      ; front 前台（挪真光标）/ bg 后台（投窗口消息）
+button=L           ; L / M / R
+interval=50        ; 毫秒，1–60000
+follow=0           ; 1 = 跟随光标
+cancelMove=0       ; 1 = 鼠标一动就停（follow=1 时自动作废）
+tipMode=persist    ; persist 常驻 / fade 2 秒 / off 不显示
+```
+
+`AutoClickToggle` 每次启动都重读这个文件，改完不用重载脚本。文件不存在或某项认不出时用内置默认。
 
 **Brightness（亮度调节）**
 
@@ -69,6 +91,7 @@
 ## 说明与边界
 
 - **不联网、不写注册表、不装服务**。三个模块都只在 MyKeymap 进程里跑。
+- `AutoClick` 的设置存在模块目录下的 `scripts\autoclick.cfg`（纯文本，`.gitignore` 已忽略该目录，不会入库）。
 - `KeyRecorder` 录的是**物理按键与鼠标事件**并原样回放，属于本地宏工具。录制文件默认存在脚本所在目录的 `scripts\` 子目录，是纯文本 JSON，可以直接读、手改、版本管理。
 - `AutoClick` 的「后台」后端靠给目标窗口投递鼠标消息实现。它对**按系统真实光标定位**的程序（典型是 Unity 引擎做的游戏）无效；也不适用于 UWP / 部分 RawInput 程序。**请只用于你自己的、允许自动化的软件**；在游戏里用可能违反其用户协议。
 - `Brightness` 的 Gamma 办法在 WinPE 下无效（`SetDeviceGammaRamp` 是空操作），会自动退回遮罩方案；遮罩只能变暗，且压不住开始菜单与独占全屏程序。
