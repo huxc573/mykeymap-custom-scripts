@@ -5,6 +5,27 @@
 
 ---
 
+## [v1.3.0] - 2026-11-23 14:56
+
+新增「音频输出设备切换」模块；亮度模块补齐异常兜底与失败日志（仓内版本停在 v1.1.0 那次同步，落后真源码一个迭代，本次一并对齐）。
+
+### AudioSwitch · 新增
+
+- **`AudioSwitchNext()` —— 循环切换播放设备**：在系统所有 ACTIVE 播放端点之间依次切换；切完重读默认设备校验，不信返回值。
+  同时设置 `eConsole` / `eMultimedia` / `eCommunications` 三个角色，避免播放器、通信软件各走各的。
+- **`AudioSwitchSet(name)`**：按设备名子串匹配直接切（不区分大小写），如 `AudioSwitchSet("耳机")`。
+- **`AudioSwitchList()`**：列出可用设备与当前默认，排错用。
+- **零外部依赖**：只用 CoreAudio（`IMMDeviceEnumerator` + 未公开的 `IPolicyConfig::SetDefaultEndpoint`），
+  不需要 SoundVolumeView / AudioDeviceCmdlets 这类第三方工具或 PowerShell 模块。
+- 提示走 ToolTip 通道 7（避开亮度的 5、连点器的 1/6），文案 `音频:设备名` / `音频:失败-<环节>`。
+
+### Brightness · 变更
+
+- **所有对外入口加异常兜底（`BaGuard`）**：出错不再弹框、不卡热键，只在光标旁提示 `亮度:失败-<环节>`。
+- **新增失败日志**：`BrightLog()` 打开、`BrightLogPurge()` 删除，开关 `BR_LogOn`（默认 `false` = 完全不写盘）。
+- **对外入口拆成 `Xxx → XxxCore`**：入口只做兜底与提示，实现沉到 Core，对外签名不变。
+- **WMI 背光会话掉线自愈**：`BgWmiEnsure` / `BgWmiDrop`，显示器休眠或驱动重置后自动重连，不再需要重启脚本。
+
 ## [v1.2.0] - 2026-10-30 17:20
 
 连点器从「参数写在热键里」变成「参数存盘 + 设置界面」；录制器补上暂停/续放，三个对话框改成按内容排版。

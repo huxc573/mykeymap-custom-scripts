@@ -1,13 +1,14 @@
 # MyKeymap 自定义脚本
 
-> **v1.2**（`VERSION` = `1.2.0` · 2026-10-30 17:20）· 变更见 [CHANGELOG.md](CHANGELOG.md)
+> **v1.3**（`VERSION` = `1.3.0` · 2026-11-23 14:56）· 变更见 [CHANGELOG.md](CHANGELOG.md)
 
-给 [MyKeymap](https://mykeymap.com) 写的三个 AutoHotkey v2 模块。全部**本地运行、不联网、不驻留后台服务**。
+给 [MyKeymap](https://mykeymap.com) 写的四个 AutoHotkey v2 模块。全部**本地运行、不联网、不驻留后台服务**。
 
 ## 模块
 
 | 文件 | 干什么 | 对外入口 |
 | :--- | :--- | :--- |
+| `AudioSwitch.ahk` | 音频输出设备切换。在所有可用播放设备之间循环切；也可以按名字直接切到某个设备。零外部依赖，不装 SoundVolumeView | `AudioSwitchNext` / `AudioSwitchSet` / `AudioSwitchList` |
 | `KeyRecorder.ahk` | 键鼠录制 / 回放。可把录到的操作存成 JSON 脚本文件，之后再加载回放；回放中可暂停、从原地续放 | `RecToggle` / `RecPlay` / `RecSave` / `RecLoad` / `RecStop` / `RecClear` / `RecInfo` |
 | `AutoClick.ahk` | 连点器。有「前台」和「后台」两条后端：后台用窗口消息投递，不移动系统光标、不抢焦点。带设置界面，参数存本地文件 | `AutoClickToggle` / `AutoClickSettings` / `AutoClick` / `AutoClickStop` / `AutoClickProbe` |
 | `Brightness.ahk` | 屏幕亮度调节。**只动鼠标所在的那块屏**（可用 `BR_PerMonitor` 关掉改成全屏）。两个入口：`BrightAuto` 软件优先（Gamma → 遮罩）、`BrightHw` 硬件优先（背光 → Gamma → 遮罩） | `BrightAuto` / `BrightHw` / `BrightDdc` / `BrightWmi` / `BrightGamma` / `BrightGammaReset` / `BrightRefreshGamma` / `BrightMask` / `BrightCursorRestore` |
@@ -16,24 +17,35 @@
 
 ## 安装
 
-1. 把三个 `.ahk` 放进 MyKeymap 的 `data/self/` 目录。
-2. 在 `data/custom_functions.ahk` 末尾加三行：
+1. 把四个 `.ahk` 放进 MyKeymap 的 `data/self/` 目录。
+2. 在 `data/custom_functions.ahk` 末尾加四行：
 
    ```ahk
    #Include ../data/self/AutoClick.ahk
    #Include ../data/self/Brightness.ahk
    #Include ../data/self/KeyRecorder.ahk
+   #Include ../data/self/AudioSwitch.ahk
    ```
 
    > **依赖**：`KeyRecorder` 复用了 `AutoClick` 里的两个小工具（`AcTip` 贴光标提示、`AcMouseScreen` 取鼠标所在屏幕），
    > 所以 `AutoClick.ahk` 要排在前面，这两个文件别拆开单独装（只装 KeyRecorder 时提示会报「函数未定义」）。
-   > `Brightness.ahk` 无跨模块依赖，可以单独用。
+   > `Brightness.ahk` 与 `AudioSwitch.ahk` 无跨模块依赖，可以单独用。
 
 3. 在 MyKeymap 的设置界面里，给热键选「自定义函数 / ahkCode」并填下表里的调用，保存后重载脚本。
 
 ## 默认接线
 
 以下是从作者 `data/config.json` 里抽出的真实接线（只抄了函数调用本身）。键位前缀 `*` 表示「其它修饰键按住时也触发」，是 MyKeymap 的配置写法，原样照抄即可。
+
+**AudioSwitch（音频输出切换）**
+
+| 键位 | ahkCode |
+| :--- | :--- |
+| `*` `y` | `AudioSwitchNext()` |
+
+无参数，每按一次切到**下一个**可用播放设备（顺序按系统枚举）。切换成功提示 `音频:设备名`，失败提示 `音频:失败-<环节>`。
+想固定切到某一个就用 `AudioSwitchSet("耳机")`（设备名子串匹配，不区分大小写）；先按一次 `AudioSwitchList()` 能看到准确名字和当前默认。
+只统计 **ACTIVE** 端点 —— 被禁用或没插的接口不参与循环，所以循环里只会出现「当前真能出声」的那几个。
 
 **KeyRecorder（键鼠录制 / 回放）**
 
@@ -113,7 +125,7 @@ git push origin main v1.0.1      # 只推这一个标签，不要 git push --tag
 ```
 
 提交信息 `<type>(<scope>): <描述>`，type 取 `feat` / `fix` / `perf` / `refactor` / `docs` / `chore` / `security`；
-scope 用模块名小写：`recorder` / `autoclick` / `brightness`，跨模块的改动写 `repo`。
+scope 用模块名小写：`recorder` / `autoclick` / `brightness` / `audio`，跨模块的改动写 `repo`。
 
 发版检查：静态自检过（`AutoHotkey64.exe /validate <脚本>` 退出码 0 且无输出）→ 无个人路径 / 凭据 / 本机配置入库 →
 `VERSION` / `CHANGELOG` / README 三处同步 → 提交打标签按名推送。
