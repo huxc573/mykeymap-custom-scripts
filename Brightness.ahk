@@ -55,6 +55,8 @@
 ;   BrightRefreshGamma(*)       显示器插拔 / 改分辨率后重刷 Gamma（由 custom_functions 调用）
 ;   BrightMask(delta := 5)      纯软件遮罩
 ;   BrightCursorRestore(*)      急救：把遮罩藏起来的系统指针还回来
+;   BrightLog(*)                用记事本打开失败日志（排错）
+;   BrightLogPurge(*)           删掉失败日志（排错完清理）
 ;
 ; 命名约定：
 ;   对外函数 PascalCase 不带前缀；
@@ -64,6 +66,9 @@
 ;
 ; 坑（Gui）：窗口「构造选项」不认 x/y/w/h，尺寸位置只能交给 Show("x.. y.. w.. h..")。
 ; 坑（Mouse）：本环境 MouseClick/MouseMove 的 Speed 不能填 0（本文件不用，备忘）。
+; 出错排查：所有对外入口都有兜底（BaGuard），异常不会弹框、不会卡住热键，只在光标旁提示
+;   「亮度:失败-<环节>」，完整异常写进失败日志（BA_ErrLog；开关 BR_LogOn，false = 完全不写盘；
+;   BrightLog() 打开 / BrightLogPurge() 删除）。
 ; 编码：UTF-8 无 BOM + CRLF + 末尾换行。改完必须重载 MyKeymap（设置界面保存）才生效。
 ;====================================================================
 
@@ -88,7 +93,14 @@ BR_PerMonitor := true   ; true = 亮度只作用于鼠标所在那块屏；false
 ; --- 通用 ---
 BA_TipMs  := 1500                            ; 提示停留时长（ms）
 BA_TipNo  := 5                               ; 专用 ToolTip 编号（各方案共用，避免提示互相清掉）
-BA_ErrLog := A_Temp "\mykeymap_bright.err.log"   ; 失败时的完整异常文本（只排错用，可随时删）
+
+; --- 失败日志（只排错用，正常使用零开销） ---
+BR_LogOn  := false                           ; false = 彻底关掉日志：异常照样兜住、照样弹提示，只是不写盘
+                                             ; 排错要证据时改回 true（重载后生效）
+BA_ErrLog := A_Temp "\mykeymap_bright.err.log"
+                                             ; 只在「真出异常」时追加，没出过错就没有这个文件；
+                                             ; 本机 = C:\Users\<用户名>\AppData\Local\Temp\mykeymap_bright.err.log
+                                             ; 超 64KB 自动清空；BrightLog() 打开 / BrightLogPurge() 删除
 
 ; ====================================================================
 ; 公共小工具
@@ -137,9 +149,62 @@ BaClearTip(*) {
 ;   失败的异常不往外抛：抛出去会弹 AHK 错误框，只说「某行出错」，不如提示 + 日志好定位
 ;--------------------------------------------------------------------
 BaErr(where, e) {
+    BaNote(where, e)
+    BaTip("亮度:失败-" where)                ; 提示只给环节名，正文看日志
+}
+
+;--------------------------------------------------------------------
+; 内部：只记日志、**不弹提示** —— 给「能自己降级的小故障」用
+;   例：WMI 缓存过期、已自动重连成功；下层还有 Gamma / 遮罩兜着，结果没受影响，
+;   弹「失败」只会吓人。真正的失败仍走 BaErr。
+;--------------------------------------------------------------------
+BaNote(where, e) {
+    global BA_ErrLog, BR_LogOn
+    if !BR_LogOn                             ; BR_LogOn = false 时完全不碰磁盘
+        return
+    try {
+        ; 日志只留最近 64KB：异常连发时不至于无限增长（删了会自动重建）
+        if (FileExist(BA_ErrLog) && FileGetSize(BA_ErrLog) > 65536)
+            FileDelete(BA_ErrLog)
+        FileAppend(A_Now " [" where "] " e.Message "`n"
+            . "  what=" e.What "  line=" e.Line "  file=" e.File "`n"
+            . "  stack=" (HasProp(e, "Stack") ? e.Stack : "-") "`n", BA_ErrLog, "UTF-8")
+    }
+}
+
+;--------------------------------------------------------------------
+; 内部：对外入口的统一兜底 —— 未捕获异常一律转成「短提示 + 日志」
+;   为什么必须兜：AHK 的未捕获异常会弹错误框，并**暂停整个脚本**。
+;   那一刻 MyKeymap 所有热键一起失灵（按 `-` / `=` / 滚轮全无反应），
+;   看起来就像「快捷键被占用 / 卡住」。兜住之后，出错只是这一次调节失败。
+;--------------------------------------------------------------------
+BaGuard(where, cb) {
+    try
+        return cb()
+    catch as e {
+        BaErr(where, e)
+        return false
+    }
+}
+
+;--------------------------------------------------------------------
+; 对外：记事本打开失败日志（排错用；没有失败就不产生日志）
+;--------------------------------------------------------------------
+BrightLog(*) {
     global BA_ErrLog
-    try FileAppend(A_Now " " where ": " e.Message " | line " e.Line "`n", BA_ErrLog, "UTF-8")
-    BaTip("亮度(遮罩):失败-" where " " SubStr(e.Message, 1, 16))
+    if !FileExist(BA_ErrLog)
+        try FileAppend("", BA_ErrLog, "UTF-8")
+    try Run('notepad.exe "' BA_ErrLog '"')
+    return BA_ErrLog
+}
+
+;--------------------------------------------------------------------
+; 对外：删掉失败日志（排错完清理干净；本来就没有也算成功）
+;--------------------------------------------------------------------
+BrightLogPurge(*) {
+    global BA_ErrLog
+    try FileDelete(BA_ErrLog)
+    return !FileExist(BA_ErrLog)
 }
 
 ; ====================================================================
@@ -156,9 +221,16 @@ BaErr(where, e) {
 BaMonList() {
     global BA_EnumList
     BA_EnumList := []
-    cb := CallbackCreate(BaEnumMonCollect, "Fast", 4)
-    DllCall("user32\EnumDisplayMonitors", "Ptr",0, "Ptr",0, "Ptr",cb, "Ptr",0)
-    CallbackFree(cb)
+    cb := 0
+    try {
+        cb := CallbackCreate(BaEnumMonCollect, "Fast", 4)
+        DllCall("user32\EnumDisplayMonitors", "Ptr",0, "Ptr",0, "Ptr",cb, "Ptr",0)
+    } catch as e {
+        BaErr("枚举显示器", e)
+        BA_EnumList := []
+    }
+    if cb
+        try CallbackFree(cb)
     return BA_EnumList
 }
 
@@ -350,6 +422,10 @@ BgClearGammaOne(name) {
 ;   动作落在 BgTargets() 给的屏上（默认只有鼠标所在那块，见 BR_PerMonitor）；各屏 gamma 独立记录
 ;--------------------------------------------------------------------
 BrightGamma(delta := 5) {
+    return BaGuard("BrightGamma", (*) => BrightGammaCore(delta))
+}
+
+BrightGammaCore(delta := 5) {
     delta := BaNum(delta, 5)
     ts := BgTargets()
     if !ts.Length {
@@ -378,6 +454,10 @@ BrightGamma(delta := 5) {
 ;   (*) 让它可以将来直接当 Hotkey 回调绑定，收下传进来的热键名
 ;--------------------------------------------------------------------
 BrightGammaReset(*) {
+    return BaGuard("BrightGammaReset", (*) => BrightGammaResetCore())
+}
+
+BrightGammaResetCore(*) {
     BrightGamma(0)
 }
 
@@ -389,8 +469,13 @@ BrightGammaReset(*) {
 ;   （这是合并前 VistaCare 顶掉自动重载处理器的老问题）。
 ;--------------------------------------------------------------------
 BrightRefreshGamma(*) {
+    return BaGuard("BrightRefreshGamma", (*) => BrightRefreshGammaCore())
+}
+
+BrightRefreshGammaCore(*) {
     global BG_GammaMap, BG_WmiTarget, BG_WmiTried
     BG_WmiTried := false, BG_WmiTarget := ""      ; 屏可能换了，WMI 定位缓存作废
+    try BgWmiDrop()                               ; 连接一起丢：显示器一换，旧 WMI 对象多半也废了
     ok := false
     for name in BG_GammaMap {
         if BgSetOneGamma(name, BgGammaOf(name))
@@ -408,6 +493,10 @@ BrightRefreshGamma(*) {
 ;   或写入失败（CreateDCW + SetDeviceGammaRamp 没成功）。
 ;--------------------------------------------------------------------
 BrightAuto(delta := 5) {
+    return BaGuard("BrightAuto", (*) => BrightAutoCore(delta))
+}
+
+BrightAutoCore(delta := 5) {
     delta := BaNum(delta, 5)
     ts := BgTargets()
 
@@ -447,6 +536,10 @@ BrightAuto(delta := 5) {
 ;   硬件接管某屏时会撤掉同屏的软件残留（Gamma 回 100% + 遮罩撤掉），免得叠着用越调越黑。
 ;--------------------------------------------------------------------
 BrightHw(delta := 5) {
+    return BaGuard("BrightHw", (*) => BrightHwCore(delta))
+}
+
+BrightHwCore(delta := 5) {
     delta := BaNum(delta, 5)
     ts := BgTargets()
 
@@ -464,7 +557,7 @@ BrightHw(delta := 5) {
         return false
     }
 
-    got := 0
+    hit := false, got := 0                        ; hit = 硬件是否真的接管（Pct 可能是 0，不能拿来当真假判据）
     for m in ts {                                 ; 一级：硬件背光
         r := BgDdcSet(m, delta)                   ; 外接屏：DDC/CI
         if !r
@@ -472,10 +565,11 @@ BrightHw(delta := 5) {
         if r {
             BgClearGammaOne(m.Name)               ; 硬件接管这屏了 -> 撤掉同屏的软件残留
             BaMaskOffOne(m.Name)
+            hit := true
             got := r.Pct
         }
     }
-    if got {
+    if hit {
         BaTip("亮度(硬件):" got "%")
         return true
     }
@@ -584,12 +678,14 @@ BaMaskCursorSync() {
 ;--------------------------------------------------------------------
 BaRaiseMask(*) {
     global BA_Mask
-    for name in BA_Mask {
-        hwnd := BA_Mask[name].Hwnd
-        if !hwnd
-            continue
-        ; SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE|SWP_NOOWNERZORDER = 0x0213
-        DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", -1, "Int",0, "Int",0, "Int",0, "Int",0, "UInt",0x0213)
+    try {
+        for name in BA_Mask {
+            hwnd := BA_Mask[name].Hwnd
+            if !hwnd
+                continue
+            ; SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE|SWP_NOOWNERZORDER = 0x0213
+            DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", -1, "Int",0, "Int",0, "Int",0, "Int",0, "UInt",0x0213)
+        }
     }
 }
 
@@ -692,6 +788,10 @@ BaMaskOne(m, delta) {
 ;   每屏一个窗口、各自 alpha；返回 true = 至少有一屏建出了遮罩
 ;--------------------------------------------------------------------
 BrightMask(delta := 5) {
+    return BaGuard("BrightMask", (*) => BrightMaskCore(delta))
+}
+
+BrightMaskCore(delta := 5) {
     delta := BaNum(delta, 5)
     ts := BgTargets()
 
@@ -724,6 +824,10 @@ BrightMask(delta := 5) {
 ;   不必重启。先把遮罩全撤掉（否则撤完指针又被逻辑藏回去），再强制走还原分支。
 ;--------------------------------------------------------------------
 BrightCursorRestore(*) {
+    return BaGuard("BrightCursorRestore", (*) => BrightCursorRestoreCore())
+}
+
+BrightCursorRestoreCore(*) {
     global BA_CursorHidden
     BaMaskOff()
     BA_CursorHidden := true
@@ -783,6 +887,17 @@ BgDdcPhys(m) {
 ;   一台屏挂多个物理输出时全都设一遍（少见），提示取最后一个成功的
 ;--------------------------------------------------------------------
 BgDdcSet(m, delta) {
+    global BG_DdcDead                   ; 这一屏判定不可用：后续直接短路，不再等 I2C 超时
+    try
+        return BgDdcSetCore(m, delta)
+    catch as e {
+        BG_DdcDead[m.Name] := true
+        BaErr("DDC", e)
+        return false                        ; false = 这屏 DDC 不可用 -> 上层自动退 WMI / Gamma
+    }
+}
+
+BgDdcSetCore(m, delta) {
     global BG_DdcMap, BG_DdcDead
     static VCP_BRIGHTNESS := 0x10
 
@@ -826,6 +941,15 @@ BgDdcSet(m, delta) {
 ;   屏已拔掉 / 取不到的跳过；返回 true = 至少还了一台
 ;--------------------------------------------------------------------
 BgDdcResetAll() {
+    try
+        return BgDdcResetAllCore()
+    catch as e {
+        BaErr("DDC还原", e)
+        return false
+    }
+}
+
+BgDdcResetAllCore() {
     global BG_DdcMap
     static VCP_BRIGHTNESS := 0x10
 
@@ -865,6 +989,10 @@ BgDdcResetAll() {
 ;   返回 true = 设置成功（false 表示这屏 DDC 不可用，BrightAuto 会往后退）
 ;--------------------------------------------------------------------
 BrightDdc(delta := 5) {
+    return BaGuard("BrightDdc", (*) => BrightDdcCore(delta))
+}
+
+BrightDdcCore(delta := 5) {
     delta := BaNum(delta, 5)
     if (delta = 0) {
         ok := BgDdcResetAll()
@@ -897,7 +1025,12 @@ BrightDdc(delta := 5) {
 ;   就是 Win 亮度滑块那条路。WMI 只暴露**内置屏**一个实例，所以必须先把内置屏
 ;   认到某个 \\.\DISPLAYn 上（BgWmiTargetName），否则多屏下会调错屏。
 ;   delta 正数变亮、负数变暗、0 还原；默认 +5；返回 true = 设置成功
+;   坑（2026-10-09 实测）：WMI 的 COM 对象**不能长期缓存** —— 放几小时后再用会报
+;   0x80041032「调用已取消 / SWbemObjectSet」；同一个连接上再发一次查询，也会把上一次
+;   的枚举作废。对策：Locator 也留全局、查询顺序改成「先读当前值、最后查 methods」、
+;   失败就丢缓存重试一次（BgWmiSet / BgWmiReset 自带自愈），两轮都不成才退 Gamma。
 ; ====================================================================
+BG_WmiLoc    := 0        ; 缓存的 SWbemLocator —— **必须比 Svc/Meth 活得久**，否则子对象报 0x80041032
 BG_WmiSvc    := 0        ; 缓存的 SWbemServices（首次用时建，省得每次按键都 ConnectServer）
 BG_WmiMeth   := 0        ; 缓存的 WmiMonitorBrightnessMethods 集合
 BG_WmiOrig   := -1       ; 首次触碰前的原始亮度；-1 = 没记过（delta=0 还它）
@@ -968,30 +1101,64 @@ BgWmiTargetName() {
 }
 
 ;--------------------------------------------------------------------
+; 内部：丢掉全部 WMI 缓存（对象失效 / 显示屏变化时用；BG_WmiOrig 不动 —— delta=0 还要还它）
+;   BG_WmiCur 一并清成 -1，下次重连会重新从系统读一次真值，比记着旧的准
+;--------------------------------------------------------------------
+BgWmiDrop() {
+    global BG_WmiLoc, BG_WmiSvc, BG_WmiMeth, BG_WmiCur
+    BG_WmiLoc := 0, BG_WmiSvc := 0, BG_WmiMeth := 0, BG_WmiCur := -1
+    return
+}
+
+;--------------------------------------------------------------------
+; 内部：确保 WMI 对象可用（没有就重建连接 + 查一次）；true = 可用
+;   **查询顺序有讲究**：先把当前亮度读出来，最后才查 methods —— 同一个连接上再发
+;   一次查询会把上一次的枚举作废（0x80041032），所以 methods 必须放最后、立刻就用。
+;   异常一律往外抛，由调用方的自愈壳决定重试还是放弃。
+;--------------------------------------------------------------------
+BgWmiEnsure() {
+    global BG_WmiLoc, BG_WmiSvc, BG_WmiMeth, BG_WmiCur
+    if IsObject(BG_WmiMeth)
+        return true
+    BG_WmiLoc := ComObject("WbemScripting.SWbemLocator")
+    BG_WmiSvc := BG_WmiLoc.ConnectServer(".", "root\wmi")
+    b := BG_WmiSvc.ExecQuery("SELECT CurrentBrightness FROM WmiMonitorBrightness")
+    BG_WmiCur := (b.Count > 0) ? b.ItemIndex(0).CurrentBrightness : -1
+    q := BG_WmiSvc.ExecQuery("SELECT * FROM WmiMonitorBrightnessMethods")
+    if (!IsObject(q) || (q.Count = 0))
+        return false
+    BG_WmiMeth := q
+    return true
+}
+
+;--------------------------------------------------------------------
 ; 内部：对**一台**屏设 WMI 亮度（不弹提示），delta ≠ 0；返回 {Pct} 或 false
 ;   只有「鼠标这块屏 == WMI 能控的屏」才动手，别的屏一律 false（防止调错屏）
+;   自愈：缓存过期（0x80041032）时丢掉重建再试一次 —— 不要因为一次缓存失效就让
+;   整个亮度调节失败（上层还有 Gamma / 遮罩可退）。
 ;--------------------------------------------------------------------
 BgWmiSet(m, delta) {
-    global BG_WmiSvc, BG_WmiMeth, BG_WmiOrig, BG_WmiCur
-
     if (BgWmiTargetName() != m.Name)
         return false
 
-    if !IsObject(BG_WmiMeth) {
-        try {
-            loc := ComObject("WbemScripting.SWbemLocator")
-            BG_WmiSvc := loc.ConnectServer(".", "root\wmi")
-            q := BG_WmiSvc.ExecQuery("SELECT * FROM WmiMonitorBrightnessMethods")
-            if (!IsObject(q) || (q.Count = 0))
-                return false
-            BG_WmiMeth := q
-            b := BG_WmiSvc.ExecQuery("SELECT CurrentBrightness FROM WmiMonitorBrightness")
-            if (b.Count > 0)
-                BG_WmiCur := b.ItemIndex(0).CurrentBrightness
-        } catch {
-            return false
+    err := 0
+    loop 2 {                                      ; 第 1 轮用缓存；失败丢缓存，第 2 轮重建
+        try
+            return BgWmiSetOnce(m, delta)
+        catch as e {
+            err := e
+            BgWmiDrop()
         }
     }
+    BaNote("WMI", err)                            ; 两轮都不成：留证据，但不弹提示
+    return false
+}
+
+BgWmiSetOnce(m, delta) {
+    global BG_WmiMeth, BG_WmiOrig, BG_WmiCur
+
+    if !BgWmiEnsure()
+        return false
 
     if (!IsNumber(BG_WmiCur) || (BG_WmiCur < 0))
         BG_WmiCur := 50                           ; 读不到就从中间值起步
@@ -1014,10 +1181,24 @@ BgWmiSet(m, delta) {
 
 ;--------------------------------------------------------------------
 ; 内部：把 WMI 亮度还回原始值；返回 true = 还成功
+;   同样自愈：缓存过期就丢了重连再还（退出清理也走这里，不能因为缓存坏了就把屏留在暗处）
 ;--------------------------------------------------------------------
 BgWmiReset() {
+    global BG_WmiOrig
+    if (BG_WmiOrig < 0)
+        return false
+    loop 2 {
+        try
+            return BgWmiResetOnce()
+        catch
+            BgWmiDrop()
+    }
+    return false
+}
+
+BgWmiResetOnce() {
     global BG_WmiMeth, BG_WmiOrig, BG_WmiCur
-    if (BG_WmiOrig < 0) || !IsObject(BG_WmiMeth)
+    if !BgWmiEnsure() || (BG_WmiOrig < 0)
         return false
     ok := 0
     loop BG_WmiMeth.Count {
@@ -1036,6 +1217,10 @@ BgWmiReset() {
 ;   delta < 0 变暗 / > 0 变亮 / = 0 还回原始亮度；默认 +5
 ;--------------------------------------------------------------------
 BrightWmi(delta := 5) {
+    return BaGuard("BrightWmi", (*) => BrightWmiCore(delta))
+}
+
+BrightWmiCore(delta := 5) {
     delta := BaNum(delta, 5)
     if (delta = 0) {
         ok := BgWmiReset()
