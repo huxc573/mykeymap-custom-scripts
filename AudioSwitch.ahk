@@ -4,10 +4,10 @@
 ; 只用 Windows CoreAudio（IMMDeviceEnumerator + 未公开的 IPolicyConfig），
 ; 不依赖任何外部 exe / PowerShell 模块。
 ;
-; 对外函数（都不自带热键，由 keymap 调用）：
-;   AudioSwitchNext(*)          在所有 ACTIVE 播放设备之间循环切换（主入口）
-;   AudioSwitchSet(name)        按名字模糊匹配切到指定设备，如 AudioSwitchSet("耳机")
-;   AudioSwitchList(*)          提示当前所有可用设备 + 当前默认（排错用）
+; 对外函数（不自带热键，由 keymap 调用）：
+;   AudioSwitch(*)           在所有 ACTIVE 播放设备之间循环切换；每按一次切到下一个
+;   AudioSwitchSet(name)     按名字直达指定设备，如 AudioSwitchSet("耳机")；不区分大小写
+;   AudioSwitchList(*)       列出可用设备与当前默认（配 Set 时查名字 / 排错用）
 ;
 ; 行为：切 eConsole / eMultimedia / eCommunications 三个角色（与系统「默认设备」一致），
 ;       切完重新读一次默认设备做校验，不信返回值。
@@ -167,7 +167,7 @@ AsSetDefault(devId) {
 ; ---------------------------------------------------------------
 
 ; 循环切到下一个播放设备
-AudioSwitchNext(*) {
+AudioSwitch(*) {
     try {
         devs := AsDevices()
         if (devs.Length = 0) {

@@ -1,6 +1,6 @@
 # MyKeymap 自定义脚本
 
-> **v1.3**（`VERSION` = `1.3.0` · 2026-11-23 14:56）· 变更见 [CHANGELOG.md](CHANGELOG.md)
+> **v1.3.1**（`VERSION` = `1.3.1` · 2026-11-23 15:05）· 变更见 [CHANGELOG.md](CHANGELOG.md)
 
 给 [MyKeymap](https://mykeymap.com) 写的四个 AutoHotkey v2 模块。全部**本地运行、不联网、不驻留后台服务**。
 
@@ -8,7 +8,7 @@
 
 | 文件 | 干什么 | 对外入口 |
 | :--- | :--- | :--- |
-| `AudioSwitch.ahk` | 音频输出设备切换。在所有可用播放设备之间循环切；也可以按名字直接切到某个设备。零外部依赖，不装 SoundVolumeView | `AudioSwitchNext` / `AudioSwitchSet` / `AudioSwitchList` |
+| `AudioSwitch.ahk` | 音频输出设备切换。在所有可用播放设备之间循环切；也可以按名字直接切到某个设备。零外部依赖，不装 SoundVolumeView | `AudioSwitch` / `AudioSwitchSet` / `AudioSwitchList` |
 | `KeyRecorder.ahk` | 键鼠录制 / 回放。可把录到的操作存成 JSON 脚本文件，之后再加载回放；回放中可暂停、从原地续放 | `RecToggle` / `RecPlay` / `RecSave` / `RecLoad` / `RecStop` / `RecClear` / `RecInfo` |
 | `AutoClick.ahk` | 连点器。有「前台」和「后台」两条后端：后台用窗口消息投递，不移动系统光标、不抢焦点。带设置界面，参数存本地文件 | `AutoClickToggle` / `AutoClickSettings` / `AutoClick` / `AutoClickStop` / `AutoClickProbe` |
 | `Brightness.ahk` | 屏幕亮度调节。**只动鼠标所在的那块屏**（可用 `BR_PerMonitor` 关掉改成全屏）。两个入口：`BrightAuto` 软件优先（Gamma → 遮罩）、`BrightHw` 硬件优先（背光 → Gamma → 遮罩） | `BrightAuto` / `BrightHw` / `BrightDdc` / `BrightWmi` / `BrightGamma` / `BrightGammaReset` / `BrightRefreshGamma` / `BrightMask` / `BrightCursorRestore` |
@@ -41,7 +41,7 @@
 
 | 键位 | ahkCode |
 | :--- | :--- |
-| `*` `y` | `AudioSwitchNext()` |
+| CapsLock 层 `*` `'` | `AudioSwitch()` |
 
 无参数，每按一次切到**下一个**可用播放设备（顺序按系统枚举）。切换成功提示 `音频:设备名`，失败提示 `音频:失败-<环节>`。
 想固定切到某一个就用 `AudioSwitchSet("耳机")`（设备名子串匹配，不区分大小写）；先按一次 `AudioSwitchList()` 能看到准确名字和当前默认。

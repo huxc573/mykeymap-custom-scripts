@@ -5,13 +5,17 @@
 
 ---
 
+## [v1.3.1] - 2026-11-23 15:05
+
+- 主入口 `AudioSwitchNext()` 更名为 `AudioSwitch()`（与模块同名，调用时少打几个字符）；`AudioSwitchSet` / `AudioSwitchList` 不变。
+
 ## [v1.3.0] - 2026-11-23 14:56
 
 新增「音频输出设备切换」模块；亮度模块补齐异常兜底与失败日志（仓内版本停在 v1.1.0 那次同步，落后真源码一个迭代，本次一并对齐）。
 
 ### AudioSwitch · 新增
 
-- **`AudioSwitchNext()` —— 循环切换播放设备**：在系统所有 ACTIVE 播放端点之间依次切换；切完重读默认设备校验，不信返回值。
+- **`AudioSwitch()` —— 循环切换播放设备**：在系统所有 ACTIVE 播放端点之间依次切换；切完重读默认设备校验，不信返回值。
   同时设置 `eConsole` / `eMultimedia` / `eCommunications` 三个角色，避免播放器、通信软件各走各的。
 - **`AudioSwitchSet(name)`**：按设备名子串匹配直接切（不区分大小写），如 `AudioSwitchSet("耳机")`。
 - **`AudioSwitchList()`**：列出可用设备与当前默认，排错用。
