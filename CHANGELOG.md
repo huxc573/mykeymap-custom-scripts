@@ -15,7 +15,7 @@
 
 ### AudioSwitch · 新增
 
-- **`AudioSwitch()` —— 循环切换播放设备**：在系统所有 ACTIVE 播放端点之间依次切换；切完重读默认设备校验，不信返回值。
+- **`AudioSwitchNext()` —— 循环切换播放设备**：在系统所有 ACTIVE 播放端点之间依次切换；切完重读默认设备校验，不信返回值。
   同时设置 `eConsole` / `eMultimedia` / `eCommunications` 三个角色，避免播放器、通信软件各走各的。
 - **`AudioSwitchSet(name)`**：按设备名子串匹配直接切（不区分大小写），如 `AudioSwitchSet("耳机")`。
 - **`AudioSwitchList()`**：列出可用设备与当前默认，排错用。
